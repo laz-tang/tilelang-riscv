@@ -20,6 +20,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND "$ENV{CIBUILDWHEEL}")
 endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TileLangRISCVMLIR.cmake)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
   find_package(Git QUIET)
@@ -115,6 +116,8 @@ foreach(BACKEND IN LISTS TILELANG_BACKENDS)
   tilelang_define_backend_option(${BACKEND})
 endforeach()
 
+tilelang_configure_riscv_mlir()
+
 set(PREBUILD_CYTHON ON)
 
 # CUDA stub libraries (cuda/cudart/nvrtc) are used to build wheels that can run
@@ -180,7 +183,9 @@ file(GLOB TILE_LANG_SRCS
   src/target/utils.cc
   src/target/codegen_c_host.cc
   src/target/codegen_cpp.cc
+  src/target/codegen_linalg_riscv.cc
   src/target/rt_mod_cpp.cc
+  src/target/rt_mod_linalg_riscv.cc
   # intrin_rule doesn't have system dependency
   src/target/intrin_rule*.cc
 )
@@ -426,6 +431,13 @@ if(USE_Z3 AND USE_PYPI_Z3)
   find_package(Z3 REQUIRED)
 endif()
 
+# TVM prefers mold/lld when available, but the SG2044 RISC-V toolchain fails
+# to link TVM with lld due to unsupported relocations in exception tables.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(riscv|riscv32|riscv64)")
+  set(USE_ALTERNATIVE_LINKER OFF CACHE STRING
+      "Disable mold/lld auto-selection on RISC-V toolchains" FORCE)
+endif()
+
 # Include tvm after configs have been populated
 add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
 
@@ -442,9 +454,18 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
+if(TILELANG_RISCV_MLIR_ENABLED)
+  target_include_directories(tilelang_objs PRIVATE ${TILELANG_RISCV_MLIR_INCLUDE_DIRS})
+  target_compile_definitions(tilelang_objs PRIVATE TILELANG_ENABLE_LINALG_RISCV_MLIR=1)
+else()
+  target_compile_definitions(tilelang_objs PRIVATE TILELANG_ENABLE_LINALG_RISCV_MLIR=0)
+endif()
 
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm)
+if(TILELANG_RISCV_MLIR_ENABLED)
+  target_link_libraries(tilelang PRIVATE ${TILELANG_RISCV_MLIR_LINK_LIBS})
+endif()
 
 # Place dev build outputs under build/lib for consistency
 set_target_properties(tilelang PROPERTIES

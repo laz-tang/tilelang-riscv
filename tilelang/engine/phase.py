@@ -6,6 +6,10 @@ from tilelang.transform import PassContext
 from tilelang.contrib.nvcc import have_tma, have_pdl
 
 
+def is_linalg_riscv_target(target: Target | None) -> bool:
+    return target is not None and target.kind.name == "linalg_riscv"
+
+
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
     # avoid circular import
     from tilelang.jit.adapter.utils import is_cuda_target
@@ -132,6 +136,19 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
 
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
+    if is_linalg_riscv_target(target):
+        mod = tir.transform.BindTarget(target)(mod)
+        mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
+        mod = tilelang.transform.LegalizeNegativeIndex()(mod)
+        if should_enable_race_check():
+            mod = tilelang.transform.VerifyParallelLoop()(mod)
+        mod = tilelang.transform.InjectAssumes()(mod)
+        mod = tilelang.transform.Simplify()(mod)
+        mod = tilelang.transform.LowerAccessPtr()(mod)
+        mod = tilelang.transform.Simplify()(mod)
+        mod = tilelang.transform.HoistNonRestrictParams()(mod)
+        return mod
+
     # Bind the target device information to the module
     """
     Bind target information and progressively legalize and lower frontend Tile IR into a form suitable for downstream optimization and codegen.
@@ -218,7 +235,18 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
+def LowerAndLegalizeForRISCV(mod: IRModule, target: Target) -> IRModule:
+    """Compatibility entry point for the TileLang-to-Linalg RISC-V pipeline."""
+    return LowerAndLegalize(mod, target)
+
+
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
+    if is_linalg_riscv_target(target):
+        mod = tir.transform.LowerInitBlock()(mod)
+        mod = tir.transform.Simplify()(mod)
+        mod = tir.transform.RemoveNoOp()(mod)
+        return mod
+
     pass_ctx = tilelang.transform.get_pass_context()
     # Lower the shared.tmem into specific initialization slot
     mod = tilelang.transform.LowerSharedTmem()(mod)
@@ -302,3 +330,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.PersistThreadblock()(mod)
 
     return mod
+
+
+def OptimizeForRISCV(mod: IRModule, target: Target) -> IRModule:
+    """Compatibility entry point for the TileLang-to-Linalg RISC-V pipeline."""
+    return OptimizeForTarget(mod, target)

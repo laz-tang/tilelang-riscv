@@ -19,6 +19,7 @@ from tilelang.jit.adapter import (
     BaseKernelAdapter,
     CythonKernelAdapter,
     CuTeDSLKernelAdapter,
+    RiscvKernelAdapter,
     TVMFFIKernelAdapter,
     MetalKernelAdapter,
 )
@@ -205,6 +206,10 @@ class JITKernel(Generic[_P, _T]):
         """
         return self.torch_function(*args, **kwds)
 
+    def close(self) -> None:
+        if self.adapter is not None and hasattr(self.adapter, "close"):
+            self.adapter.close()
+
     def _compile_and_create_adapter(self, tilelang_func: PrimFunc, out_idx: list[int]) -> BaseKernelAdapter:
         """
         Compiles the given TileLang PrimFunc using TVM and creates a kernel adapter.
@@ -256,22 +261,35 @@ class JITKernel(Generic[_P, _T]):
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "tvm_ffi":
-            # Use TVMFFIKernelAdapter for interoperability with PyTorch via DLPack.
-            # But we need to ensure that the runtime is enabled and the runtime module is not None.
             assert artifact.rt_mod is not None, "tvm_ffi backend requires a runtime module."
-            adapter = TVMFFIKernelAdapter(
-                params=artifact.params,
-                result_idx=out_idx,
-                target=target,
-                func_or_mod=tilelang_func,
-                host_mod=artifact.host_mod,
-                device_mod=artifact.device_mod,
-                rt_mod=artifact.rt_mod,
-                device_kernel_source=artifact.kernel_source,
-                verbose=verbose,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-            )
+            if self.target.kind.name == "linalg_riscv":
+                adapter = RiscvKernelAdapter(
+                    params=artifact.params,
+                    result_idx=out_idx,
+                    target=target,
+                    func_or_mod=tilelang_func,
+                    host_mod=artifact.host_mod,
+                    device_mod=artifact.device_mod,
+                    rt_mod=artifact.rt_mod,
+                    device_kernel_source=artifact.kernel_source,
+                    verbose=verbose,
+                    pass_configs=pass_configs,
+                    compile_flags=compile_flags,
+                )
+            else:
+                adapter = TVMFFIKernelAdapter(
+                    params=artifact.params,
+                    result_idx=out_idx,
+                    target=target,
+                    func_or_mod=tilelang_func,
+                    host_mod=artifact.host_mod,
+                    device_mod=artifact.device_mod,
+                    rt_mod=artifact.rt_mod,
+                    device_kernel_source=artifact.kernel_source,
+                    verbose=verbose,
+                    pass_configs=pass_configs,
+                    compile_flags=compile_flags,
+                )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter(
                 params=artifact.params,
@@ -351,17 +369,30 @@ class JITKernel(Generic[_P, _T]):
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "tvm_ffi":
-            adapter = TVMFFIKernelAdapter.from_database(
-                params=params,
-                result_idx=result_idx,
-                target=target,
-                func_or_mod=func_or_mod,
-                host_kernel_source=host_kernel_source,
-                device_kernel_source=device_kernel_source,
-                kernel_lib_path=kernel_lib_path,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-            )
+            if target.kind.name == "linalg_riscv":
+                adapter = RiscvKernelAdapter.from_database(
+                    params=params,
+                    result_idx=result_idx,
+                    target=target,
+                    func_or_mod=func_or_mod,
+                    host_kernel_source=host_kernel_source,
+                    device_kernel_source=device_kernel_source,
+                    kernel_lib_path=kernel_lib_path,
+                    pass_configs=pass_configs,
+                    compile_flags=compile_flags,
+                )
+            else:
+                adapter = TVMFFIKernelAdapter.from_database(
+                    params=params,
+                    result_idx=result_idx,
+                    target=target,
+                    func_or_mod=func_or_mod,
+                    host_kernel_source=host_kernel_source,
+                    device_kernel_source=device_kernel_source,
+                    kernel_lib_path=kernel_lib_path,
+                    pass_configs=pass_configs,
+                    compile_flags=compile_flags,
+                )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter.from_database(
                 params=params,

@@ -8,7 +8,7 @@ from tilelang.utils.language import (
     legalize_pairwise_extents,
 )
 from tilelang.language.utils import get_extent
-from tvm import ir, tir
+from tvm import tir
 
 
 def _normalize_copy_regions(
@@ -17,10 +17,6 @@ def _normalize_copy_regions(
     tir.BufferRegion | tir.BufferLoad | tir.Buffer,
     tir.BufferRegion | tir.BufferLoad | tir.Buffer,
 ]:
-    # If both side are buffers, we should make sure their shapes are equal
-    if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
-        ir.assert_structural_equal(src.shape, dst.shape)
-
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
 

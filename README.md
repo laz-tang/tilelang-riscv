@@ -13,6 +13,81 @@ Tile Language (**tile-lang**) is a concise domain-specific language designed to 
 
 <img src=./images/MatmulExample.png />
 
+## RISC-V Status
+
+This tree includes an experimental structured MLIR-backed RISC-V path exposed as `target="riscv"` (alias of
+`target="linalg_riscv"`). The current goal of this backend is:
+
+- lower TileLang into MLIR Linalg
+- reuse MLIR vectorisation / bufferisation / lowering passes
+- generate RVV-capable native binaries and run them on real RISC-V machines such as SG2044
+
+The practical environment for native bring-up is:
+
+- LLVM/MLIR toolchain available through `TILELANG_RISCV_LLVM_ROOT`
+- local Z3 install available through `Z3_ROOT`
+- native GCC toolchain, for example `/opt/gcc-native/bin/gcc` and `/opt/gcc-native/bin/g++`
+
+See [docs/get_started/targets.md](./docs/get_started/targets.md) for target semantics and x86-side preparation.
+The SG2044 native build and execution flow is documented in
+[docs/get_started/BuildOnSG2044.md](./docs/get_started/BuildOnSG2044.md).
+
+### Current Status
+
+The codebase is prepared so that review and most frontend/compiler work can happen on x86, while native execution is
+validated on SG2044:
+
+- x86 host: inspect code generation, build the Python package, and review the RISC-V pipeline wiring
+- SG2044 host: run the MLIR toolchain, build host-side shared libraries, and execute native RVV tests
+
+The following native tests have been validated on SG2044:
+
+- `pytest testing/python/riscv/test_riscv_target_parse.py -q`
+- `pytest testing/python/riscv/test_riscv_mlir_codegen.py -q`
+- `pytest testing/python/riscv/test_riscv_toolchain.py -q`
+- `pytest testing/python/riscv/test_riscv_jit_runtime.py -q`
+
+At the time of writing, the observed results on SG2044 are:
+
+- `test_riscv_target_parse.py`: `2 passed`
+- `test_riscv_mlir_codegen.py`: `33 passed`
+- `test_riscv_toolchain.py`: `3 passed`
+- `test_riscv_jit_runtime.py`: `16 passed`
+
+### x86 Review Flow
+
+If you only want to review the code and keep the execution host separate, the recommended flow is:
+
+```bash
+git status
+python -m compileall tilelang testing/python/riscv
+pytest testing/python/riscv/test_riscv_target_parse.py -q
+pytest testing/python/riscv/test_riscv_mlir_codegen.py -q
+```
+
+That covers target parsing, MLIR code generation, and most of the structured backend wiring without requiring a
+local RISC-V machine.
+
+### SG2044 Native Flow
+
+The full native build and execution steps for SG2044 live in
+[docs/get_started/BuildOnSG2044.md](./docs/get_started/BuildOnSG2044.md).
+
+That document captures:
+
+- the validated machine layout and environment variables
+- package installation for the buddy Torch environment
+- native rebuild steps
+- validated test commands and observed results
+
+### Notes
+
+- `target="riscv"` is normalised to `linalg_riscv`
+- toolchain discovery now covers sibling Buddy builds such as `../buddy-mlir/llvm/build`
+- the RISC-V host wrapper passes `--gcc-toolchain` and `--sysroot` when it detects `/opt/gcc-native`
+- RISC-V builds disable TVM's alternative linker selection because `ld.lld` failed on the validated SG2044 toolchain
+- `z3-solver` wheels are not assumed to exist on `riscv64`; using a source-built Z3 with `Z3_ROOT` is the supported path
+
 ## Latest News
 - 02/02/2026 🧩: Check out [TileLang Puzzles](https://github.com/tile-ai/tilelang-puzzles), a fun and interactive way to learn TileLang programming with 10 progressively harder puzzles!
 - 12/18/2025 🚀: Added [CuTeDSL backend](https://github.com/tile-ai/tilelang/pull/1421) support, enabling compilation to NVIDIA CUTLASS CuTe DSL! Join us in building and optimizing this exciting new backend: [Issue #1454](https://github.com/tile-ai/tilelang/issues/1454).
@@ -135,7 +210,7 @@ Below is an example that demonstrates more advanced features: layout annotation,
 
 ```python
 # @tilelang.jit(target="cuda")
-# target currently can be "cuda" or "hip" or "cpu".
+# target currently can be "cuda", "hip", "cpu", or "riscv".
 # if not specified, it will be inferred from the input tensors during compile time
 @tilelang.jit
 def matmul_relu(
