@@ -12,9 +12,9 @@
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangLinalgRISCV {
+class CodeGenTileLangRISCV {
 public:
-  CodeGenTileLangLinalgRISCV() = default;
+  CodeGenTileLangRISCV() = default;
 
   void AddFunction(const GlobalVar &gvar, const tir::PrimFunc &func);
   std::string Finish() const;

@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 from typing import Any, Callable
 
+import numpy as np
 import torch
 from tvm import tir
 from tvm.target import Target
@@ -85,7 +86,14 @@ class RiscvKernelAdapter(BaseKernelAdapter):
                 continue
             buffer = buffer_map[param]
             for j, shape in enumerate(buffer.shape):
-                if isinstance(shape, tir.Var) and shape not in dynamic_symbolic_map:
+                if not isinstance(shape, tir.Var):
+                    continue
+                existing = dynamic_symbolic_map.get(shape)
+                should_update = existing is None
+                if existing is not None:
+                    existing_param_idx, _ = existing
+                    should_update = existing_param_idx in self.result_idx and i not in self.result_idx
+                if should_update:
                     dynamic_symbolic_map[shape] = (i, j)
                     self._dynamic_symbolic_name_map[shape.name] = (i, j)
         return dynamic_symbolic_map
@@ -136,10 +144,24 @@ class RiscvKernelAdapter(BaseKernelAdapter):
         if not isinstance(value, torch.Tensor):
             raise TypeError(f"Expected a torch.Tensor input, but got {type(value)}")
         if value.device.type != "cpu":
-            raise ValueError("The current linalg_riscv host runner only supports CPU tensors")
+            raise ValueError("The current riscv host runner only supports CPU tensors")
         if not value.is_contiguous():
             value = value.contiguous()
         return value.detach()
+
+    def _torch_tensor_to_numpy(self, value: torch.Tensor) -> np.ndarray:
+        dtype = value.dtype
+        if dtype == torch.bfloat16:
+            return value.view(torch.uint16).numpy().view(np.dtype("bfloat16"))
+        if dtype == getattr(torch, "float8_e4m3fn", None):
+            return value.view(torch.uint8).numpy().view(np.dtype("float8_e4m3fn"))
+        if dtype == getattr(torch, "float8_e5m2", None):
+            return value.view(torch.uint8).numpy().view(np.dtype("float8_e5m2"))
+        if dtype == getattr(torch, "float8_e4m3fnuz", None):
+            return value.view(torch.uint8).numpy().view(np.dtype("float8_e4m3fnuz"))
+        if dtype == getattr(torch, "float8_e5m2fnuz", None):
+            return value.view(torch.uint8).numpy().view(np.dtype("float8_e5m2fnuz"))
+        return value.numpy()
 
     def _convert_torch_func(self) -> Callable[..., Any]:
         param_dtypes = [param.torch_dtype() for param in self.params]
@@ -176,7 +198,7 @@ class RiscvKernelAdapter(BaseKernelAdapter):
                 host_args.append(provided_args[i])
 
             native_args = [
-                arg.numpy() if isinstance(arg, torch.Tensor) else arg
+                self._torch_tensor_to_numpy(arg) if isinstance(arg, torch.Tensor) else arg
                 for arg in host_args
             ]
             self._get_host_library()(*native_args)

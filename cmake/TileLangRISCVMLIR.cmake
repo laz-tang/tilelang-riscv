@@ -1,10 +1,10 @@
 include_guard(GLOBAL)
 
 set(TILELANG_RISCV_MLIR_MODE "AUTO" CACHE STRING
-    "Enable vendored LLVM/MLIR integration for the linalg_riscv backend (AUTO, ON, OFF)")
+    "Enable vendored LLVM/MLIR integration for the riscv backend (AUTO, ON, OFF)")
 set_property(CACHE TILELANG_RISCV_MLIR_MODE PROPERTY STRINGS AUTO ON OFF)
 set(TILELANG_RISCV_LLVM_ROOT "" CACHE PATH
-    "LLVM/MLIR install prefix used by the linalg_riscv backend")
+    "LLVM/MLIR install prefix used by the riscv backend")
 
 function(tilelang_configure_riscv_mlir)
   string(TOUPPER "${TILELANG_RISCV_MLIR_MODE}" _tilelang_riscv_mlir_mode)
@@ -57,7 +57,7 @@ function(tilelang_configure_riscv_mlir)
         "Build it with maint/scripts/build_llvm_mlir.sh or set TILELANG_RISCV_LLVM_ROOT.")
     endif()
     message(STATUS
-      "LLVM/MLIR toolchain for linalg_riscv not found; keeping placeholder backend build. "
+      "LLVM/MLIR toolchain for riscv not found; keeping placeholder backend build. "
       "Set TILELANG_RISCV_LLVM_ROOT or build 3rdparty/llvm-project/install to enable it.")
     set(TILELANG_RISCV_MLIR_FOUND FALSE PARENT_SCOPE)
     set(TILELANG_RISCV_MLIR_ENABLED FALSE PARENT_SCOPE)
@@ -73,13 +73,13 @@ function(tilelang_configure_riscv_mlir)
   set(_include_dirs ${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
   list(REMOVE_DUPLICATES _include_dirs)
 
-  message(STATUS "Using LLVM/MLIR toolchain for linalg_riscv: ${_found_root}")
+  message(STATUS "Using LLVM/MLIR toolchain for riscv: ${_found_root}")
 
   set(TILELANG_RISCV_MLIR_FOUND TRUE PARENT_SCOPE)
   set(TILELANG_RISCV_MLIR_ENABLED TRUE PARENT_SCOPE)
   set(TILELANG_RISCV_MLIR_ROOT "${_found_root}" PARENT_SCOPE)
   set(TILELANG_RISCV_MLIR_INCLUDE_DIRS "${_include_dirs}" PARENT_SCOPE)
   set(TILELANG_RISCV_MLIR_LINK_LIBS
-      "MLIRIR;MLIRFuncDialect;MLIRArithDialect;MLIRLinalgDialect;MLIRMemRefDialect;MLIRSCFDialect"
+      "MLIRIR;MLIRFuncDialect;MLIRArithDialect;MLIRLinalgDialect;MLIRMemRefDialect;MLIRSCFDialect;MLIRVectorDialect"
       PARENT_SCOPE)
 endfunction()

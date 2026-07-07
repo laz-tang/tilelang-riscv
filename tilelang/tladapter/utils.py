@@ -26,7 +26,7 @@ def _get_native_module():
     except ImportError as err:
         raise ImportError(
             "TileLang MLIR adapters require a native module. "
-            "Build TileLang with the linalg_riscv/MLIR integration enabled."
+            "Build TileLang with the riscv/MLIR integration enabled."
         ) from err
     native = getattr(_tladapter, "_native", None)
     if native is None:

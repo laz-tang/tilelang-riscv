@@ -108,6 +108,14 @@ def _dtype_token_to_numpy(dtype_token: str) -> np.dtype:
         return np.dtype(np.float64)
     if dtype_token == "bf16":
         return np.dtype("bfloat16")
+    if dtype_token == "f8E4M3FN":
+        return np.dtype("float8_e4m3fn")
+    if dtype_token == "f8E5M2":
+        return np.dtype("float8_e5m2")
+    if dtype_token == "f8E4M3FNUZ":
+        return np.dtype("float8_e4m3fnuz")
+    if dtype_token == "f8E5M2FNUZ":
+        return np.dtype("float8_e5m2fnuz")
     if dtype_token == "i1":
         return np.dtype(np.bool_)
     if dtype_token == "index":
@@ -353,7 +361,43 @@ def _resolve_riscv_gcc_root() -> Path | None:
     return None
 
 
-def _riscv_clang_flags() -> list[str]:
+def _riscv_gcc_runtime_library_dirs(gcc_root: Path) -> list[Path]:
+    abi = os.environ.get("TILELANG_RISCV_ABI")
+    abi_names = [abi] if abi else ["lp64d", "lp64f", "lp64", "ilp32d", "ilp32f", "ilp32"]
+    candidates: list[Path] = []
+    for abi_name in abi_names:
+        candidates.extend(
+            [
+                gcc_root / "lib64" / abi_name,
+                gcc_root / "lib32" / abi_name,
+                gcc_root / "lib" / "lib64" / abi_name,
+                gcc_root / "lib" / "lib32" / abi_name,
+                gcc_root / "sysroot" / "lib64" / abi_name,
+                gcc_root / "sysroot" / "lib32" / abi_name,
+                gcc_root / "sysroot" / "usr" / "lib64" / abi_name,
+                gcc_root / "sysroot" / "usr" / "lib32" / abi_name,
+            ]
+        )
+
+    runtime_dirs: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if (candidate / "libgcc_s.so").is_file() and candidate not in seen:
+            runtime_dirs.append(candidate)
+            seen.add(candidate)
+
+    if runtime_dirs:
+        return runtime_dirs
+
+    for runtime_lib in gcc_root.rglob("libgcc_s.so"):
+        runtime_dir = runtime_lib.parent
+        if runtime_dir not in seen:
+            runtime_dirs.append(runtime_dir)
+            seen.add(runtime_dir)
+    return runtime_dirs
+
+
+def _riscv_clang_flags(*, include_runtime_library_dirs: bool = False) -> list[str]:
     flags: list[str] = []
     gcc_root = _resolve_riscv_gcc_root()
     if gcc_root is not None:
@@ -361,6 +405,10 @@ def _riscv_clang_flags() -> list[str]:
         sysroot = gcc_root / "sysroot"
         if sysroot.is_dir():
             flags.append(f"--sysroot={sysroot}")
+        if include_runtime_library_dirs:
+            for runtime_dir in _riscv_gcc_runtime_library_dirs(gcc_root):
+                flags.append(f"-L{runtime_dir}")
+                flags.append(f"-Wl,-rpath,{runtime_dir}")
     if os.environ.get("TILELANG_RISCV_MARCH"):
         flags.append(f"-march={os.environ['TILELANG_RISCV_MARCH']}")
     if os.environ.get("TILELANG_RISCV_ABI"):
@@ -582,7 +630,7 @@ def build_host_shared_library(
         active_triple = triple or resolve_host_triple()
         if active_triple:
             cmd.extend(["-target", active_triple])
-        cmd.extend(_riscv_clang_flags())
+        cmd.extend(_riscv_clang_flags(include_runtime_library_dirs=True))
         if clang_flags:
             cmd.extend(clang_flags)
         _run_checked(cmd)

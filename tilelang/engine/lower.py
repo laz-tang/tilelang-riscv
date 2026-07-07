@@ -24,7 +24,7 @@ from tilelang.engine.phase import (
 
 
 def is_cpu_device_backend(target: Target):
-    return target.kind.name in {"c", "linalg_riscv"}
+    return target.kind.name in {"c", "riscv"}
 
 
 def has_device_kernel_launch(attrs) -> bool:
@@ -223,8 +223,8 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target, target: Target | N
 
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    if target.kind.name == "linalg_riscv":
-        return tvm.ffi.get_global_func("target.build.tilelang_linalg_riscv")(device_mod, target)
+    if target.kind.name == "riscv":
+        return tvm.ffi.get_global_func("target.build.tilelang_riscv")(device_mod, target)
 
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
@@ -245,8 +245,8 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
 
 
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
-    if target.kind.name == "linalg_riscv":
-        return tvm.ffi.get_global_func("target.build.tilelang_linalg_riscv")(device_mod, target)
+    if target.kind.name == "riscv":
+        return tvm.ffi.get_global_func("target.build.tilelang_riscv")(device_mod, target)
 
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
@@ -314,7 +314,7 @@ def lower(
     # Phase 2: Optimize the IR for the target
     mod = OptimizeForTarget(mod, target)
 
-    if target.kind.name == "linalg_riscv":
+    if target.kind.name == "riscv":
         codegen_mod = device_codegen(mod, target) if enable_device_compile else device_codegen_without_compile(mod, target)
         return CompiledArtifact(tvm.IRModule(), mod, params, codegen_mod.inspect_source(), rt_mod=codegen_mod)
 

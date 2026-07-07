@@ -183,9 +183,9 @@ file(GLOB TILE_LANG_SRCS
   src/target/utils.cc
   src/target/codegen_c_host.cc
   src/target/codegen_cpp.cc
-  src/target/codegen_linalg_riscv.cc
+  src/target/codegen_riscv.cc
   src/target/rt_mod_cpp.cc
-  src/target/rt_mod_linalg_riscv.cc
+  src/target/rt_mod_riscv.cc
   # intrin_rule doesn't have system dependency
   src/target/intrin_rule*.cc
 )
@@ -456,9 +456,9 @@ endif()
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 if(TILELANG_RISCV_MLIR_ENABLED)
   target_include_directories(tilelang_objs PRIVATE ${TILELANG_RISCV_MLIR_INCLUDE_DIRS})
-  target_compile_definitions(tilelang_objs PRIVATE TILELANG_ENABLE_LINALG_RISCV_MLIR=1)
+  target_compile_definitions(tilelang_objs PRIVATE TILELANG_ENABLE_RISCV_MLIR=1)
 else()
-  target_compile_definitions(tilelang_objs PRIVATE TILELANG_ENABLE_LINALG_RISCV_MLIR=0)
+  target_compile_definitions(tilelang_objs PRIVATE TILELANG_ENABLE_RISCV_MLIR=0)
 endif()
 
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
