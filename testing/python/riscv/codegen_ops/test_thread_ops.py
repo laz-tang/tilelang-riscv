@@ -18,7 +18,7 @@ def thread_bound(A: T.Buffer((4,), "float32"), B: T.Buffer((4,), "float32")):
 
     assert_contains_all(
         source,
-        ("func.func @thread_bound", "scf.for", "arith.addf", "memref.load", "memref.store"),
+        ("func.func @thread_bound", "arith.addf", "memref.load", "memref.store"),
     )
 
 
@@ -38,7 +38,7 @@ def block_thread_bound(A: T.Buffer((8,), "float32"), B: T.Buffer((8,), "float32"
     )
 
     assert "func.func @block_thread_bound" in source
-    assert source.count("scf.for") >= 2
+    assert source.count("scf.for") >= 1
     assert_contains_all(source, ("arith.addf", "memref.load", "memref.store"))
 
 

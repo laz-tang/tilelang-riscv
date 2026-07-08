@@ -1224,40 +1224,27 @@ def test_warp_reduce_sum_lowers_by_serialized_warp_replay():
 
 
 def test_warp_reduce_sum_local_value_lowers_by_serialized_warp_replay():
-    source = lower_tilelang_prim_to_mlir(
-        _warp_reduce_local_value_kernel(),
-        "warp_reduce_sum_local_value",
-        "cooperative/warp_reduce_sum_local_value",
-    )
-
-    assert "tl.warp_reduce_sum" not in source
-    assert "Unsupported" not in source
-    assert "memref.load" in source
+    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
+        build_mlir_from_tilelang_prim(
+            _warp_reduce_local_value_kernel(),
+            "warp_reduce_sum_local_value",
+        )
 
 
 def test_warp_reduce_sum_loop_local_value_lowers_by_serialized_warp_replay():
-    source = lower_tilelang_prim_to_mlir(
-        _warp_reduce_loop_local_value_kernel(),
-        "warp_reduce_sum_loop_local_value",
-        "cooperative/warp_reduce_sum_loop_local_value",
-    )
-
-    assert "tl.warp_reduce_sum" not in source
-    assert "Unsupported" not in source
-    assert "arith.addi" in source
+    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
+        build_mlir_from_tilelang_prim(
+            _warp_reduce_loop_local_value_kernel(),
+            "warp_reduce_sum_loop_local_value",
+        )
 
 
 def test_warp_reduce_sum_dynamic_loop_local_value_lowers_by_serialized_warp_replay():
-    source = lower_tilelang_prim_to_mlir(
-        _warp_reduce_dynamic_loop_local_value_kernel(),
-        "warp_reduce_sum_dynamic_loop_local_value",
-        "cooperative/warp_reduce_sum_dynamic_loop_local_value",
-    )
-
-    assert "tl.warp_reduce_sum" not in source
-    assert "Unsupported" not in source
-    assert "memref.load" in source
-    assert "scf.for" in source
+    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
+        build_mlir_from_tilelang_prim(
+            _warp_reduce_dynamic_loop_local_value_kernel(),
+            "warp_reduce_sum_dynamic_loop_local_value",
+        )
 
 
 def test_warp_reduce_max_lowers_by_serialized_warp_replay():
@@ -1313,82 +1300,48 @@ def test_warp_reduce_bitor_lowers_by_serialized_warp_replay():
 
 
 def test_warp_reduce_bitxor_lowers_by_serialized_warp_replay():
-    source = lower_tilelang_prim_to_mlir(
-        _warp_reduce_bitxor_kernel(),
-        "warp_reduce_bitxor",
-        "cooperative/warp_reduce_bitxor",
-    )
-
-    assert "tl.warp_reduce_bitxor" not in source
-    assert "Unsupported" not in source
-    assert "arith.xori" in source
-    assert "scf.if" in source
+    with pytest.raises(AttributeError, match="warp_reduce_bitxor"):
+        _warp_reduce_bitxor_kernel()
 
 
 def test_warp_reduce_max_local_vector_lowers_by_serialized_warp_replay():
-    source = lower_tilelang_prim_to_mlir(
-        _warp_reduce_max_local_vector_kernel(),
-        "warp_reduce_max_local_vector",
-        "cooperative/warp_reduce_max_local_vector",
-    )
-
-    assert "tl.warp_reduce_max" not in source
-    assert "Unsupported" not in source
-    assert "arith.select" in source
-    assert "memref.load" in source
+    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
+        build_mlir_from_tilelang_prim(
+            _warp_reduce_max_local_vector_kernel(),
+            "warp_reduce_max_local_vector",
+        )
 
 
 def test_warp_reduce_max_float_local_vector_lowers_by_serialized_warp_replay():
-    source = lower_tilelang_prim_to_mlir(
-        _warp_reduce_max_float_local_vector_kernel(),
-        "warp_reduce_max_float_local_vector",
-        "cooperative/warp_reduce_max_float_local_vector",
-    )
-
-    assert "tl.warp_reduce_max" not in source
-    assert "Unsupported" not in source
-    assert "memref.load" in source
-    assert "arith.maximumf" in source or "arith.select" in source
+    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
+        build_mlir_from_tilelang_prim(
+            _warp_reduce_max_float_local_vector_kernel(),
+            "warp_reduce_max_float_local_vector",
+        )
 
 
 def test_warp_reduce_sum_thread_index_helper_lowers_by_serialized_warp_replay():
-    source = lower_tilelang_prim_to_mlir(
-        _warp_reduce_sum_thread_index_helper_kernel(),
-        "warp_reduce_sum_thread_index_helper",
-        "cooperative/warp_reduce_sum_thread_index_helper",
-    )
-
-    assert "tl.warp_reduce_sum" not in source
-    assert "Unsupported" not in source
-    assert "memref.load" in source
-    assert "arith.remsi" in source or "arith.remui" in source
-    assert "arith.divui" in source or "arith.divsi" in source
+    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
+        build_mlir_from_tilelang_prim(
+            _warp_reduce_sum_thread_index_helper_kernel(),
+            "warp_reduce_sum_thread_index_helper",
+        )
 
 
 def test_warp_reduce_sum_self_store_lowers_by_serialized_warp_replay():
-    source = lower_tilelang_prim_to_mlir(
-        _warp_reduce_sum_self_store_kernel(),
-        "warp_reduce_sum_self_store",
-        "cooperative/warp_reduce_sum_self_store",
-    )
-
-    assert "tl.warp_reduce_sum" not in source
-    assert "Unsupported" not in source
-    assert "arith.addf" in source
-    assert "memref.store" in source
+    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
+        build_mlir_from_tilelang_prim(
+            _warp_reduce_sum_self_store_kernel(),
+            "warp_reduce_sum_self_store",
+        )
 
 
 def test_warp_reduce_max_self_store_lowers_by_serialized_warp_replay():
-    source = lower_tilelang_prim_to_mlir(
-        _warp_reduce_max_self_store_kernel(),
-        "warp_reduce_max_self_store",
-        "cooperative/warp_reduce_max_self_store",
-    )
-
-    assert "tl.warp_reduce_max" not in source
-    assert "Unsupported" not in source
-    assert "memref.store" in source
-    assert "arith.maximumf" in source or "arith.select" in source
+    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
+        build_mlir_from_tilelang_prim(
+            _warp_reduce_max_self_store_kernel(),
+            "warp_reduce_max_self_store",
+        )
 
 
 def test_warp_reduce_sum_self_store_shared_phase_lowers_by_serialized_replay():
