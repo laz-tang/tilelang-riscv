@@ -60,12 +60,12 @@ def test_riscv_disk_cache_reloads_without_recompile(clean_riscv_cache_env, monke
     kernel1.close()
 
     cache_files = list(Path(clean_riscv_cache_env).rglob("*.*"))
-    assert cache_files, "Expected linalg_riscv cache files to be created"
+    assert cache_files, "Expected riscv cache files to be created"
 
     _dispatch_map["tvm_ffi"]._memory_cache.clear()
 
     def _unexpected_recompile(self, tilelang_func, out_idx):
-        raise AssertionError("Disk cache miss: linalg_riscv tried to recompile instead of loading from cache")
+        raise AssertionError("Disk cache miss: riscv tried to recompile instead of loading from cache")
 
     monkeypatch.setattr(JITKernel, "_compile_and_create_adapter", _unexpected_recompile)
 

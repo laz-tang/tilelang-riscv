@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tilelang.tladapter.toolchain import resolve_llvm_root
+
 
 pytest.importorskip("tilelang.tladapter._native")
 
@@ -46,8 +48,14 @@ def _env() -> dict[str, str]:
     return env
 
 
+def _require_runtime_toolchain() -> None:
+    if resolve_llvm_root(required=False) is None:
+        pytest.skip("LLVM/MLIR runtime toolchain not available")
+
+
 @pytest.mark.parametrize("example_name", EXAMPLES)
 def test_riscv_examples_run_on_host(example_name, tmp_path):
+    _require_runtime_toolchain()
     result = subprocess.run(
         [sys.executable, str(EXAMPLE_ROOT / example_name), "--run-host", "--output-dir", str(tmp_path / example_name)],
         cwd=REPO_ROOT,
@@ -63,6 +71,7 @@ def test_riscv_examples_run_on_host(example_name, tmp_path):
 
 @pytest.mark.parametrize("example_name", EXAMPLES)
 def test_riscv_examples_emit_riscv_artifacts(example_name, tmp_path):
+    _require_runtime_toolchain()
     output_dir = tmp_path / example_name
     result = subprocess.run(
         [

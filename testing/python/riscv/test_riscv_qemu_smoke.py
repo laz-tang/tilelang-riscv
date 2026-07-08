@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from tilelang.jit.adapter.riscv import resolve_riscv_runner
+from tilelang.tladapter.toolchain import resolve_llvm_root
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -33,6 +34,8 @@ def test_riscv_qemu_smoke_example_is_present():
 
 def test_riscv_example_vector_add_runs_on_qemu(tmp_path):
     pytest.importorskip("tilelang.tladapter._native")
+    if resolve_llvm_root(required=False) is None:
+        pytest.skip("LLVM/MLIR runtime toolchain not available")
     if resolve_riscv_runner(required=False) is None:
         pytest.skip("qemu/spike runner not available on this machine")
 
