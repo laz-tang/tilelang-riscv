@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import importlib
 from pathlib import Path
 
 import tilelang.tladapter.toolchain as toolchain
@@ -12,6 +13,8 @@ from tilelang.tladapter.toolchain import (
     resolve_mlir_python_root,
     resolve_tool,
 )
+
+riscv_wrapper = importlib.import_module("tilelang.jit.adapter.riscv.wrapper")
 
 
 def _make_fake_toolchain(root: Path) -> None:
@@ -66,3 +69,23 @@ def test_missing_toolchain_raises(monkeypatch):
         return
 
     raise AssertionError("resolve_llvm_root should have raised ToolchainNotFoundError")
+
+
+def test_riscv_clang_flags_adds_gcc_runtime_multilib_dirs(monkeypatch, tmp_path):
+    fake_gcc_root = tmp_path / "gcc-native"
+    runtime_dir = fake_gcc_root / "lib64" / "lp64d"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "libgcc_s.so").write_text("")
+    (fake_gcc_root / "sysroot").mkdir()
+
+    monkeypatch.setenv("TILELANG_RISCV_GCC_ROOT", str(fake_gcc_root))
+    monkeypatch.delenv("GCC_ROOT", raising=False)
+    monkeypatch.delenv("TILELANG_RISCV_ABI", raising=False)
+    monkeypatch.delenv("TILELANG_RISCV_CLANG_FLAGS", raising=False)
+
+    flags = riscv_wrapper._riscv_clang_flags(include_runtime_library_dirs=True)
+
+    assert f"--gcc-toolchain={fake_gcc_root.resolve()}" in flags
+    assert f"--sysroot={fake_gcc_root.resolve() / 'sysroot'}" in flags
+    assert f"-L{runtime_dir}" in flags
+    assert f"-Wl,-rpath,{runtime_dir}" in flags
