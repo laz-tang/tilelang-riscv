@@ -94,6 +94,11 @@ for dtype_name_tuple in _extended_torch_dtypes:
         torch_dtype = getattr(torch, dtype_name, None)
 
     if torch_dtype is not None:
+        actual_dtype_name = str(torch_dtype).removeprefix("torch.")
+        if torch_dtype in _TORCH_DTYPE_TO_STR and _TORCH_DTYPE_TO_STR[torch_dtype] != dtype_name:
+            continue
+        if dtype_name.endswith("fnuz") and actual_dtype_name != dtype_name:
+            continue
         _TORCH_DTYPE_TO_STR[torch_dtype] = dtype_name
 
 
@@ -122,6 +127,10 @@ _STR_TO_TORCH_DTYPE.update(
         "bfloat16": torch.bfloat16,
     }
 )
+for _unsigned_dtype_name in ("uint16", "uint32", "uint64"):
+    _unsigned_torch_dtype = getattr(torch, _unsigned_dtype_name, None)
+    if _unsigned_torch_dtype is not None:
+        _STR_TO_TORCH_DTYPE[_unsigned_dtype_name] = _unsigned_torch_dtype
 
 # _STR_TO_NUMPY_DTYPE = {v: k for k, v in _NUMPY_DTYPE_TO_STR.items()}
 

@@ -130,14 +130,30 @@ class RiscvKernelAdapter(BaseKernelAdapter):
             pass
 
     def _resolve_output_shape(self, param: KernelParam, provided_args: dict[int, Any]) -> list[int]:
+        analyzer = tvm.arith.Analyzer()
+
         shape: list[int] = []
         for dim in param.shape:
-            if isinstance(dim, tir.Var):
-                ref_tensor_idx, ref_shape_idx = self._lookup_dynamic_symbolic(dim)
-                ref_tensor = provided_args[ref_tensor_idx]
-                shape.append(int(ref_tensor.shape[ref_shape_idx]))
+            expr = dim
+            if isinstance(expr, tir.PrimExpr):
+                substitution: dict[tir.Var, tir.PrimExpr] = {}
+
+                def collect_var(node):
+                    if isinstance(node, tir.Var):
+                        ref_tensor_idx, ref_shape_idx = self._lookup_dynamic_symbolic(node)
+                        ref_tensor = provided_args[ref_tensor_idx]
+                        substitution[node] = tir.IntImm(node.dtype, int(ref_tensor.shape[ref_shape_idx]))
+
+                tvm.tir.stmt_functor.post_order_visit(expr, collect_var)
+                if substitution:
+                    expr = tvm.tir.stmt_functor.substitute(expr, substitution)
+                expr = analyzer.simplify(expr)
+            if isinstance(expr, tir.IntImm):
+                shape.append(int(expr.value))
+            elif isinstance(expr, int):
+                shape.append(expr)
             else:
-                shape.append(int(dim))
+                shape.append(int(expr))
         return shape
 
     def _normalize_tensor_arg(self, value: Any) -> torch.Tensor:
@@ -153,18 +169,28 @@ class RiscvKernelAdapter(BaseKernelAdapter):
         dtype = value.dtype
         if dtype == torch.bfloat16:
             return value.view(torch.uint16).numpy().view(np.dtype("bfloat16"))
+        if dtype == getattr(torch, "float4_e2m1fn_x2", None):
+            return value.view(torch.uint8).numpy().view(np.int8)
         if dtype == getattr(torch, "float8_e4m3fn", None):
-            return value.view(torch.uint8).numpy().view(np.dtype("float8_e4m3fn"))
+            return value.view(torch.uint8).numpy()
         if dtype == getattr(torch, "float8_e5m2", None):
-            return value.view(torch.uint8).numpy().view(np.dtype("float8_e5m2"))
+            return value.view(torch.uint8).numpy()
         if dtype == getattr(torch, "float8_e4m3fnuz", None):
-            return value.view(torch.uint8).numpy().view(np.dtype("float8_e4m3fnuz"))
+            return value.view(torch.uint8).numpy()
         if dtype == getattr(torch, "float8_e5m2fnuz", None):
-            return value.view(torch.uint8).numpy().view(np.dtype("float8_e5m2fnuz"))
+            return value.view(torch.uint8).numpy()
         return value.numpy()
 
+    def _host_storage_torch_dtype(self, param: KernelParam) -> torch.dtype:
+        if param.is_float4():
+            return torch.int8
+        return param.torch_dtype()
+
+    def _host_storage_shape(self, param: KernelParam, provided_args: dict[int, Any]) -> list[int]:
+        return self._resolve_output_shape(param, provided_args)
+
     def _convert_torch_func(self) -> Callable[..., Any]:
-        param_dtypes = [param.torch_dtype() for param in self.params]
+        param_dtypes = [self._host_storage_torch_dtype(param) for param in self.params]
 
         def func(*inputs: Any):
             expected_inputs = len(self.params) - len(self.result_idx)
@@ -190,7 +216,7 @@ class RiscvKernelAdapter(BaseKernelAdapter):
             host_args: list[Any] = []
             for i, param in enumerate(self.params):
                 if i in self.result_idx:
-                    shape = self._resolve_output_shape(param, provided_args)
+                    shape = self._host_storage_shape(param, provided_args)
                     tensor = torch.empty(shape, dtype=param_dtypes[i], device="cpu")
                     host_args.append(tensor)
                     continue

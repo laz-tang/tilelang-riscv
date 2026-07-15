@@ -344,6 +344,13 @@ def get_target_compute_version(target=None):
     # 1. input target object
     # 2. Target.current()
     target = target or Target.current()
+    if target and target.kind.name == "riscv":
+        # Some CUDA-originated operator libraries query the CUDA compute
+        # capability only to choose conservative vectorization widths while
+        # constructing TIR.  The RISC-V backend does not have a CUDA SM version,
+        # so return a stable pre-Blackwell value instead of failing before the
+        # caller can compile with target="riscv".
+        return "8.0"
     if target and target.arch:
         arch = target.arch.split("_")[1].rstrip("af")
         if len(arch) == 2:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import torch
 
+import os
 from platform import mac_ver
 from typing import Literal
 from tilelang import tvm as tvm
@@ -169,6 +170,8 @@ def determine_target(target: str | Target | Literal["auto"] = "auto", return_obj
             return_var = "hip"
         elif check_metal_availability():
             return_var = "metal"
+        elif os.environ.get("TILELANG_RISCV_MLIR_MODE", "").upper() in {"1", "ON", "TRUE"}:
+            return_var = "riscv"
         else:
             raise ValueError("No CUDA or HIP or MPS available on this system.")
 

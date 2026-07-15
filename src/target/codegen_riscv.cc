@@ -844,9 +844,33 @@ mlir::Value LowerSupportedBinaryIntrinsicCall(mlir::OpBuilder& builder, mlir::Lo
     return builder.create<mlir::arith::OrIOp>(loc, lhs, rhs);
   }
   if (op->op.same_as(tir::builtin::shift_left())) {
+    if (auto integer_type = mlir::dyn_cast<mlir::IntegerType>(lhs.getType());
+        integer_type && integer_type.getWidth() < 32) {
+      mlir::Type promoted_type = builder.getIntegerType(32);
+      bool is_unsigned = op->args[0].dtype().is_uint() || op->args[0].dtype().is_bool();
+      mlir::Value promoted_lhs =
+          is_unsigned ? builder.create<mlir::arith::ExtUIOp>(loc, promoted_type, lhs).getResult()
+                      : builder.create<mlir::arith::ExtSIOp>(loc, promoted_type, lhs).getResult();
+      mlir::Value promoted_rhs = builder.create<mlir::arith::ExtUIOp>(loc, promoted_type, rhs);
+      mlir::Value shifted = builder.create<mlir::arith::ShLIOp>(loc, promoted_lhs, promoted_rhs);
+      return builder.create<mlir::arith::TruncIOp>(loc, lhs.getType(), shifted);
+    }
     return builder.create<mlir::arith::ShLIOp>(loc, lhs, rhs);
   }
   if (op->op.same_as(tir::builtin::shift_right())) {
+    if (auto integer_type = mlir::dyn_cast<mlir::IntegerType>(lhs.getType());
+        integer_type && integer_type.getWidth() < 32) {
+      mlir::Type promoted_type = builder.getIntegerType(32);
+      bool is_unsigned = op->args[0].dtype().is_uint() || op->args[0].dtype().is_bool();
+      mlir::Value promoted_lhs =
+          is_unsigned ? builder.create<mlir::arith::ExtUIOp>(loc, promoted_type, lhs).getResult()
+                      : builder.create<mlir::arith::ExtSIOp>(loc, promoted_type, lhs).getResult();
+      mlir::Value promoted_rhs = builder.create<mlir::arith::ExtUIOp>(loc, promoted_type, rhs);
+      mlir::Value shifted =
+          is_unsigned ? builder.create<mlir::arith::ShRUIOp>(loc, promoted_lhs, promoted_rhs).getResult()
+                      : builder.create<mlir::arith::ShRSIOp>(loc, promoted_lhs, promoted_rhs).getResult();
+      return builder.create<mlir::arith::TruncIOp>(loc, lhs.getType(), shifted);
+    }
     if (op->dtype.is_uint()) {
       return builder.create<mlir::arith::ShRUIOp>(loc, lhs, rhs);
     }
@@ -938,6 +962,7 @@ private:
     std::vector<std::pair<const Object*, SavedBinding>> buffer_bindings;
     std::vector<std::pair<const Object*, std::optional<tir::Buffer>>> buffer_owners;
     std::vector<std::pair<const Object*, std::optional<tir::Buffer>>> packed_owners;
+    std::vector<std::pair<const Object*, std::optional<mlir::Value>>> thread_local_backings;
     std::vector<const Object*> thread_local_keys;
   };
 
@@ -2164,6 +2189,54 @@ private:
     return found;
   }
 
+  void CollectSharedBufferStores(const tir::Stmt& stmt, std::vector<tir::Buffer>* buffers) const {
+    ICHECK(buffers != nullptr);
+    tir::PostOrderVisit(stmt, [&](const ObjectRef& node) {
+      const auto* store = node.as<tir::BufferStoreNode>();
+      if (store == nullptr || !tl::IsSharedBuffer(store->buffer)) {
+        return;
+      }
+      AppendUniqueBuffer(store->buffer, buffers);
+    });
+  }
+
+  bool StmtReadsAnySharedBuffer(const tir::Stmt& stmt,
+                                llvm::ArrayRef<tir::Buffer> buffers) const {
+    if (buffers.empty()) {
+      return false;
+    }
+    bool found = false;
+    tir::PostOrderVisit(stmt, [&](const ObjectRef& node) {
+      if (found) {
+        return;
+      }
+      const auto* load = node.as<tir::BufferLoadNode>();
+      if (load == nullptr || !tl::IsSharedBuffer(load->buffer)) {
+        return;
+      }
+      found = std::any_of(buffers.begin(), buffers.end(), [&](const tir::Buffer& buffer) {
+        return SameBuffer(load->buffer, buffer);
+      });
+    });
+    return found;
+  }
+
+  bool StmtContainsCooperativeThreadIntrinsic(const tir::Stmt& stmt) const {
+    bool found = false;
+    tir::PostOrderVisit(stmt, [&](const ObjectRef& node) {
+      if (found) {
+        return;
+      }
+      const auto* call = node.as<tir::CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      const auto* op_node = call->op.as<OpNode>();
+      found = op_node != nullptr && IsCooperativeThreadIntrinsicName(op_node->name);
+    });
+    return found;
+  }
+
   bool StmtUsesVar(const tir::Stmt& stmt, const tir::Var& var) const {
     bool found = false;
     tir::PostOrderVisit(stmt, [&](const ObjectRef& node) {
@@ -2233,6 +2306,63 @@ private:
     }
   }
 
+  void CollectLocalVarBlockAllocBuffers(const tir::Stmt& stmt,
+                                        std::vector<tir::Buffer>* buffers) const {
+    if (const auto* seq = stmt.as<tir::SeqStmtNode>()) {
+      for (const tir::Stmt& child : seq->seq) {
+        CollectLocalVarBlockAllocBuffers(child, buffers);
+      }
+      return;
+    }
+    if (const auto* attr = stmt.as<tir::AttrStmtNode>()) {
+      CollectLocalVarBlockAllocBuffers(attr->body, buffers);
+      return;
+    }
+    if (const auto* realize = stmt.as<tir::BlockRealizeNode>()) {
+      const tir::BlockNode* block = realize->block.as<tir::BlockNode>();
+      ICHECK(block != nullptr);
+      for (const tir::Buffer& buffer : block->alloc_buffers) {
+        if (buffer.defined() && buffer.scope() == "local.var") {
+          AppendUniqueBuffer(buffer, buffers);
+        }
+      }
+      CollectLocalVarBlockAllocBuffers(block->body, buffers);
+      return;
+    }
+    if (const auto* block = stmt.as<tir::BlockNode>()) {
+      for (const tir::Buffer& buffer : block->alloc_buffers) {
+        if (buffer.defined() && buffer.scope() == "local.var") {
+          AppendUniqueBuffer(buffer, buffers);
+        }
+      }
+      CollectLocalVarBlockAllocBuffers(block->body, buffers);
+      return;
+    }
+    if (const auto* if_node = stmt.as<tir::IfThenElseNode>()) {
+      CollectLocalVarBlockAllocBuffers(if_node->then_case, buffers);
+      if (if_node->else_case.defined()) {
+        CollectLocalVarBlockAllocBuffers(if_node->else_case.value(), buffers);
+      }
+      return;
+    }
+    if (const auto* for_node = stmt.as<tir::ForNode>()) {
+      CollectLocalVarBlockAllocBuffers(for_node->body, buffers);
+      return;
+    }
+    if (const auto* let = stmt.as<tir::LetStmtNode>()) {
+      CollectLocalVarBlockAllocBuffers(let->body, buffers);
+      return;
+    }
+    if (const auto* allocate = stmt.as<tir::AllocateNode>()) {
+      CollectLocalVarBlockAllocBuffers(allocate->body, buffers);
+      return;
+    }
+    if (const auto* realize = stmt.as<tir::BufferRealizeNode>()) {
+      CollectLocalVarBlockAllocBuffers(realize->body, buffers);
+      return;
+    }
+  }
+
   void CollectSerializedWarpReplayThreadLocalBlockAllocBuffers(
       const tir::Stmt& stmt, llvm::ArrayRef<ThreadLocalBlockAllocBinding> existing_bindings,
       std::vector<tir::Buffer>* buffers) const {
@@ -2272,6 +2402,14 @@ private:
     return contains(buffer.get()) || contains(buffer->data.get());
   }
 
+  bool IsScalarLocalVarBuffer(const tir::Buffer& buffer) const {
+    if (!buffer.defined() || buffer.scope() != "local.var" || buffer->shape.size() != 1) {
+      return false;
+    }
+    std::optional<int64_t> extent = GetOptionalStaticInt(buffer->shape[0]);
+    return extent.has_value() && extent.value() == 1;
+  }
+
   void BindSharedBlockAllocBuffersForThreadLaunch(llvm::ArrayRef<tir::Buffer> buffers,
                                                   const tir::IterVarNode* iter_var,
                                                   ScopedBufferBindings* saved) {
@@ -2305,11 +2443,15 @@ private:
       ValidateContiguousBuffer(buffer);
       Array<PrimExpr> backing_shape;
       backing_shape.push_back(thread_extent);
-      for (const PrimExpr& dim : buffer->shape) {
-        backing_shape.push_back(dim);
+      if (!IsScalarLocalVarBuffer(buffer)) {
+        for (const PrimExpr& dim : buffer->shape) {
+          backing_shape.push_back(dim);
+        }
       }
-      bindings.push_back(ThreadLocalBlockAllocBinding{
-          buffer, CreateAlloca(backing_shape, buffer->dtype)});
+      ThreadLocalBlockAllocBinding binding{buffer, CreateAlloca(backing_shape, buffer->dtype)};
+      InitializeThreadLocalBackingFromExpr(
+          binding.backing, buffer, thread_extent, LookupLocalVarInitForDataVar(buffer->data));
+      bindings.push_back(binding);
     }
     return bindings;
   }
@@ -2325,13 +2467,15 @@ private:
     sizes.reserve(buffer->shape.size() + 1);
     strides.reserve(buffer->shape.size() + 1);
 
-    offsets.push_back(thread_index);
+    offsets.push_back(AsIndex(thread_index, DataType::Int(32)));
     sizes.push_back(builder_.getIndexAttr(1));
     strides.push_back(builder_.getIndexAttr(1));
-    for (const PrimExpr& dim : buffer->shape) {
-      offsets.push_back(builder_.getIndexAttr(0));
-      sizes.push_back(LowerIndexOpFoldResult(dim));
-      strides.push_back(builder_.getIndexAttr(1));
+    if (!IsScalarLocalVarBuffer(buffer)) {
+      for (const PrimExpr& dim : buffer->shape) {
+        offsets.push_back(builder_.getIndexAttr(0));
+        sizes.push_back(LowerIndexOpFoldResult(dim));
+        strides.push_back(builder_.getIndexAttr(1));
+      }
     }
 
     mlir::MemRefType result_type = mlir::memref::SubViewOp::inferRankReducedResultType(
@@ -2349,6 +2493,17 @@ private:
       mlir::Value subview = CreateThreadLocalBlockAllocSubview(binding, thread_index);
       BindBufferAliases(binding.buffer, subview, &saved->buffer_bindings,
                         &saved->buffer_owners);
+      auto save_backing = [&](const Object* key) {
+        auto it = active_thread_local_backings_.find(key);
+        if (it == active_thread_local_backings_.end()) {
+          saved->thread_local_backings.emplace_back(key, std::nullopt);
+        } else {
+          saved->thread_local_backings.emplace_back(key, it->second);
+        }
+        active_thread_local_backings_[key] = binding.backing;
+      };
+      save_backing(binding.buffer.get());
+      save_backing(binding.buffer->data.get());
       saved->thread_local_keys.push_back(binding.buffer.get());
       saved->thread_local_keys.push_back(binding.buffer->data.get());
       ++prebound_thread_local_block_buffers_[binding.buffer.get()];
@@ -2372,6 +2527,14 @@ private:
     RestoreBindings(buffer_values_, saved->buffer_bindings);
     RestoreBufferOwnerBindings(saved->buffer_owners);
     RestorePackedDataOwnerBindings(saved->packed_owners);
+    for (auto it = saved->thread_local_backings.rbegin();
+         it != saved->thread_local_backings.rend(); ++it) {
+      if (it->second.has_value()) {
+        active_thread_local_backings_[it->first] = it->second.value();
+      } else {
+        active_thread_local_backings_.erase(it->first);
+      }
+    }
     for (const Object* key : saved->thread_local_keys) {
       auto it = prebound_thread_local_block_buffers_.find(key);
       ICHECK(it != prebound_thread_local_block_buffers_.end() && it->second > 0)
@@ -2908,6 +3071,10 @@ private:
       mlir::Value thread_index, DataType result_dtype) {
     PrimExpr resolved = ResolveBoundPrimExpr(expr);
     const auto* load = resolved.as<tir::BufferLoadNode>();
+    if (load == nullptr) {
+      resolved = ResolveSerializedWarpReplayExpr(expr);
+      load = resolved.as<tir::BufferLoadNode>();
+    }
     if (load == nullptr || (load->predicate.defined() && !tir::is_one(load->predicate.value())) ||
         load->buffer->dtype.lanes() != 1) {
       return std::nullopt;
@@ -2922,7 +3089,22 @@ private:
       }
     }
     if (binding == nullptr) {
-      return std::nullopt;
+      auto backing_it = active_thread_local_backings_.find(load->buffer.get());
+      if (backing_it == active_thread_local_backings_.end()) {
+        backing_it = active_thread_local_backings_.find(load->buffer->data.get());
+      }
+      if (backing_it == active_thread_local_backings_.end()) {
+        return std::nullopt;
+      }
+      ThreadLocalBlockAllocBinding map_binding{load->buffer, backing_it->second};
+      mlir::Value subview = CreateThreadLocalBlockAllocSubview(map_binding, thread_index);
+      llvm::SmallVector<mlir::Value, 4> indices;
+      indices.reserve(load->indices.size());
+      for (const PrimExpr& index : load->indices) {
+        indices.push_back(AsIndex(VisitExpr(index), index.dtype()));
+      }
+      mlir::Value value = builder_.create<mlir::memref::LoadOp>(loc_, subview, indices);
+      return CastValue(value, load->buffer->dtype, result_dtype);
     }
 
     mlir::Value subview = CreateThreadLocalBlockAllocSubview(*binding, thread_index);
@@ -2933,6 +3115,27 @@ private:
     }
     mlir::Value value = builder_.create<mlir::memref::LoadOp>(loc_, subview, indices);
     return CastValue(value, load->buffer->dtype, result_dtype);
+  }
+
+  bool ExprIsThreadLocalBindingLoad(
+      const PrimExpr& expr, llvm::ArrayRef<ThreadLocalBlockAllocBinding> bindings) const {
+    PrimExpr resolved = ResolveBoundPrimExpr(expr);
+    const auto* load = resolved.as<tir::BufferLoadNode>();
+    if (load == nullptr) {
+      resolved = ResolveSerializedWarpReplayExpr(expr);
+      load = resolved.as<tir::BufferLoadNode>();
+    }
+    if (load == nullptr || (load->predicate.defined() && !tir::is_one(load->predicate.value())) ||
+        load->buffer->dtype.lanes() != 1) {
+      return false;
+    }
+    for (const ThreadLocalBlockAllocBinding& binding : bindings) {
+      if (binding.buffer.get() == load->buffer.get() ||
+          binding.buffer->data.get() == load->buffer->data.get()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   PrimExpr ResolveSerializedWarpReplayExpr(const PrimExpr& expr) const {
@@ -3916,13 +4119,26 @@ private:
 
     if (const auto* seq = stmt.as<tir::SeqStmtNode>()) {
       ffi::Array<tir::Stmt> current_phase;
+      std::vector<tir::Buffer> current_phase_shared_writes;
       bool saw_sync = false;
       for (size_t child_index = 0; child_index < seq->seq.size(); ++child_index) {
         const tir::Stmt& child = seq->seq[child_index];
         if (IsPhaseBoundarySyncStmt(child)) {
           saw_sync = true;
           PushPhaseBoundaryOrNoOp(&current_phase, phases);
+          current_phase_shared_writes.clear();
           continue;
+        }
+        if (!current_phase.empty() &&
+            StmtReadsAnySharedBuffer(child, current_phase_shared_writes)) {
+          saw_sync = true;
+          PushNonEmptyPhase(&current_phase, phases);
+          current_phase_shared_writes.clear();
+        }
+        if (!current_phase.empty() && StmtContainsCooperativeThreadIntrinsic(child)) {
+          saw_sync = true;
+          PushNonEmptyPhase(&current_phase, phases);
+          current_phase_shared_writes.clear();
         }
         if (CanLowerTileCumsumAsThreadLaunchPhaseGlobalOp(child, thread_var_for_phase_global)) {
           bool prev_is_phase_boundary =
@@ -3950,16 +4166,20 @@ private:
         }
         if (child_phases.size() == 1) {
           current_phase.push_back(child_phases.front());
+          CollectSharedBufferStores(child_phases.front(), &current_phase_shared_writes);
           continue;
         }
 
         saw_sync = true;
         current_phase.push_back(child_phases.front());
+        CollectSharedBufferStores(child_phases.front(), &current_phase_shared_writes);
         PushNonEmptyPhase(&current_phase, phases);
+        current_phase_shared_writes.clear();
         for (size_t i = 1; i + 1 < child_phases.size(); ++i) {
           phases->push_back(child_phases[i]);
         }
         current_phase.push_back(child_phases.back());
+        CollectSharedBufferStores(child_phases.back(), &current_phase_shared_writes);
       }
       PushNonEmptyPhase(&current_phase, phases);
       if (!saw_sync) {
@@ -5623,8 +5843,15 @@ private:
     ICHECK(kind.has_value()) << "serialized warp replay expects a supported tl.warp_reduce_* op";
     ICHECK_EQ(op->args.size(), 1U) << "tl.warp_reduce_* expects <value>";
 
-    bool uses_direct_thread_local = CanUseDirectThreadLocalLoadForSerializedWarpReplay(op->args[0]);
-    PrimExpr replay_value_expr = GetSerializedWarpReplayCandidateExpr(op->args[0]);
+    llvm::SmallVector<ThreadLocalBlockAllocBinding, 4> active_thread_local_bindings(
+        CurrentActiveThreadLocalBlockAllocBindings().begin(),
+        CurrentActiveThreadLocalBlockAllocBindings().end());
+    bool uses_direct_thread_local =
+        CanUseDirectThreadLocalLoadForSerializedWarpReplay(op->args[0]) ||
+        ExprIsThreadLocalBindingLoad(op->args[0], active_thread_local_bindings);
+    PrimExpr replay_value_expr =
+        uses_direct_thread_local ? ResolveBoundPrimExpr(op->args[0])
+                                 : ResolveSerializedWarpReplayExpr(op->args[0]);
     mlir::Value acc =
         CastValue(VisitExpr(replay_value_expr), replay_value_expr.dtype(), op->dtype);
     mlir::Value current_tx =
@@ -5636,9 +5863,6 @@ private:
     mlir::Value extent_value =
         ConstantIntLike(thread_idx_x->extent.value(), builder_.getIndexType());
     PrimExpr thread_extent_expr = IntImm(DataType::Int(32), thread_idx_x->extent.value());
-    llvm::SmallVector<ThreadLocalBlockAllocBinding, 4> active_thread_local_bindings(
-        CurrentActiveThreadLocalBlockAllocBindings().begin(),
-        CurrentActiveThreadLocalBlockAllocBindings().end());
     mlir::Value acc_slot = CreateStaticAlloca({1}, op->dtype);
     mlir::Value slot_index = ZeroIndex();
     llvm::SmallVector<mlir::Value, 1> slot_indices{slot_index};
@@ -5663,9 +5887,16 @@ private:
           std::optional<mlir::Value> direct_value =
               TryLoadSerializedWarpReplayDirectThreadLocalValue(
                   op->args[0], active_thread_local_bindings, candidate_tx, op->dtype);
-          ICHECK(direct_value.has_value())
-              << "serialized tl.warp_reduce_* direct thread-local replay lost its backing";
-          candidate_value = direct_value.value();
+          if (direct_value.has_value()) {
+            candidate_value = direct_value.value();
+          } else {
+            EmitWithBoundThreadLaunchValue(
+                thread_idx_x->iter_var, thread_extent_expr, candidate_tx,
+                active_thread_local_bindings, true, [&]() {
+                  candidate_value =
+                      CastValue(VisitExpr(replay_value_expr), replay_value_expr.dtype(), op->dtype);
+                });
+          }
         } else {
           EmitWithBoundThreadLaunchValue(
               thread_idx_x->iter_var, thread_extent_expr, candidate_tx,
@@ -6057,6 +6288,9 @@ private:
         mlir::MemRefType expected_type = LowerBufferMemRefType(buffer);
         if (source_type.getElementType() == expected_type.getElementType() &&
             it->second.getType() != expected_type) {
+          if (IsPreboundThreadLocalBlockBuffer(buffer)) {
+            return it->second;
+          }
           return CreateBufferAliasView(buffer, it->second);
         }
       }
@@ -6068,6 +6302,9 @@ private:
         mlir::MemRefType expected_type = LowerBufferMemRefType(buffer);
         if (source_type.getElementType() == expected_type.getElementType() &&
             it->second.getType() != expected_type) {
+          if (IsPreboundThreadLocalBlockBuffer(buffer)) {
+            return it->second;
+          }
           return CreateBufferAliasView(buffer, it->second);
         }
       }
@@ -6412,6 +6649,56 @@ private:
     mlir::Value init_value = VisitExpr(init_expr);
     init_value = CastValue(init_value, init_expr.dtype(), dtype);
     builder_.create<mlir::memref::StoreOp>(loc_, init_value, alloc, zero_indices);
+  }
+
+  mlir::Value CreateZeroValueBeforeCanonicalHelper(DataType dtype) {
+    mlir::Type type = LowerScalarType(dtype);
+    if (dtype.lanes() > 1) {
+      mlir::Type element_type = LowerScalarType(dtype.element_of());
+      llvm::SmallVector<mlir::Value, 8> lanes;
+      lanes.reserve(dtype.lanes());
+      for (int lane = 0; lane < dtype.lanes(); ++lane) {
+        if (IsFloatLikeType(dtype)) {
+          lanes.push_back(builder_.create<mlir::arith::ConstantOp>(
+              loc_, builder_.getFloatAttr(mlir::cast<mlir::FloatType>(element_type), 0.0)));
+        } else {
+          lanes.push_back(ConstantIntLike(0, element_type));
+        }
+      }
+      return builder_.create<mlir::vector::FromElementsOp>(loc_, type, lanes);
+    }
+    if (IsFloatLikeType(dtype)) {
+      return builder_.create<mlir::arith::ConstantOp>(
+          loc_, builder_.getFloatAttr(mlir::cast<mlir::FloatType>(type), 0.0));
+    }
+    return ConstantIntLike(0, type);
+  }
+
+  void InitializeThreadLocalBackingFromExpr(mlir::Value backing, const tir::Buffer& buffer,
+                                            const PrimExpr& thread_extent,
+                                            std::optional<PrimExpr> init_expr) {
+    mlir::Value zero = ZeroIndex();
+    mlir::Value upper = AsIndex(VisitExpr(thread_extent), thread_extent.dtype());
+    mlir::Value one = ConstantIntLike(1, builder_.getIndexType());
+    mlir::scf::ForOp for_op = builder_.create<mlir::scf::ForOp>(loc_, zero, upper, one);
+
+    mlir::OpBuilder::InsertionGuard guard(builder_);
+    builder_.setInsertionPoint(for_op.getBody()->getTerminator());
+    llvm::SmallVector<mlir::Value, 4> indices;
+    indices.push_back(for_op.getInductionVar());
+    if (!IsScalarLocalVarBuffer(buffer)) {
+      for (size_t i = 0; i < buffer->shape.size(); ++i) {
+        indices.push_back(ZeroIndex());
+      }
+    }
+    mlir::Value init_value;
+    if (init_expr.has_value()) {
+      init_value = VisitExpr(init_expr.value());
+      init_value = CastValue(init_value, init_expr.value().dtype(), buffer->dtype);
+    } else {
+      init_value = CreateZeroValueBeforeCanonicalHelper(buffer->dtype);
+    }
+    builder_.create<mlir::memref::StoreOp>(loc_, init_value, backing, indices);
   }
 
   void MaybeInitializeAllocaFromLocalVarInit(mlir::Value alloc, const tir::Var& data_var,
@@ -9247,6 +9534,33 @@ private:
       }
       return false;
     }
+    if (const auto* allocate = stmt.as<tir::AllocateNode>()) {
+      if (!HasNestedThreadLaunchSplitLoop(allocate->body, thread_iter_var)) {
+        return false;
+      }
+      tir::Buffer owner_buffer(allocate->buffer_var, allocate->dtype, allocate->extents,
+                               ffi::Array<PrimExpr>(), PrimExpr(),
+                               allocate->buffer_var->name_hint, runtime::kAllocAlignment, 1,
+                               tir::BufferType::kDefault);
+      if (tl::IsSharedBuffer(owner_buffer)) {
+        return false;
+      }
+      std::vector<ThreadLocalBlockAllocBinding> thread_local_bindings(
+          existing_thread_local_bindings.begin(), existing_thread_local_bindings.end());
+      if (!ThreadLocalBindingsContainBuffer(existing_thread_local_bindings, owner_buffer)) {
+        std::vector<ThreadLocalBlockAllocBinding> new_thread_local_bindings =
+            CreateThreadLocalBlockAllocBackings({owner_buffer}, thread_iter_var, thread_extent);
+        thread_local_bindings.insert(thread_local_bindings.end(),
+                                     new_thread_local_bindings.begin(),
+                                     new_thread_local_bindings.end());
+      }
+      EmitConditionalRegion(allocate->condition, [&]() {
+        TryEmitThreadLaunchNestedSerialLoopPhases(
+            allocate->body, thread_iter_var, thread_extent, phase_emitter,
+            thread_local_bindings, active_let_bindings);
+      });
+      return true;
+    }
     if (const auto* seq = stmt.as<tir::SeqStmtNode>()) {
       bool found_nested_split_loop = false;
       for (const tir::Stmt& child : seq->seq) {
@@ -9355,8 +9669,15 @@ private:
     ScopedBufferBindings saved_shared_bindings;
     BindSharedBlockAllocBuffersForThreadLaunch(shared_buffers, iter_var,
                                                &saved_shared_bindings);
+    std::vector<tir::Buffer> thread_local_storage_buffers(cross_phase_local_buffers.begin(),
+                                                          cross_phase_local_buffers.end());
+    std::vector<tir::Buffer> local_var_buffers;
+    CollectLocalVarBlockAllocBuffers(original_body, &local_var_buffers);
+    for (const tir::Buffer& buffer : local_var_buffers) {
+      AppendUniqueBuffer(buffer, &thread_local_storage_buffers);
+    }
     std::vector<ThreadLocalBlockAllocBinding> thread_local_bindings =
-        CreateThreadLocalBlockAllocBackings(cross_phase_local_buffers, iter_var, extent);
+        CreateThreadLocalBlockAllocBackings(thread_local_storage_buffers, iter_var, extent);
     for (const tir::Stmt& phase : phases) {
       if (IsThreadLaunchPhaseGlobalTileCumsumStmt(phase)) {
         VisitStmt(phase);
@@ -9422,8 +9743,12 @@ private:
             ScopedBufferBindings saved_shared_bindings;
             BindSharedBlockAllocBuffersForThreadLaunch(shared_buffers, iter_var,
                                                        &saved_shared_bindings);
+            std::vector<tir::Buffer> local_var_buffers;
+            CollectLocalVarBlockAllocBuffers(op->body, &local_var_buffers);
+            std::vector<ThreadLocalBlockAllocBinding> thread_local_bindings =
+                CreateThreadLocalBlockAllocBackings(local_var_buffers, iter_var, op->extent);
             EmitThreadLaunchBodyWithBindings(
-                phases.front(), iter_var, op->extent, {},
+                phases.front(), iter_var, op->extent, thread_local_bindings,
                 [&](mlir::Value induction_var) {
                   LowerLoopBodyStmt(op, phases.front(), induction_var);
                 },
@@ -9724,8 +10049,12 @@ private:
             ScopedBufferBindings saved_shared_bindings;
             BindSharedBlockAllocBuffersForThreadLaunch(shared_buffers, iter_var,
                                                        &saved_shared_bindings);
+            std::vector<tir::Buffer> local_var_buffers;
+            CollectLocalVarBlockAllocBuffers(op->body, &local_var_buffers);
+            std::vector<ThreadLocalBlockAllocBinding> thread_local_bindings =
+                CreateThreadLocalBlockAllocBackings(local_var_buffers, iter_var, op->value);
             EmitThreadLaunchBodyWithBindings(
-                phases.front(), iter_var, op->value, {},
+                phases.front(), iter_var, op->value, thread_local_bindings,
                 [&](mlir::Value) { VisitStmt(phases.front()); },
                 StmtUsesVar(op->body, iter_var->var), &phases.front());
             RestoreScopedBufferBindings(&saved_shared_bindings);
@@ -9804,6 +10133,43 @@ private:
         deferred.alloc_buffers.push_back(buffer);
         continue;
       }
+      if (InSingleNonUnitThreadIdxXRegion() && buffer.defined() &&
+          buffer.scope() == "local.var" &&
+          CanMaterializeThreadLocalBlockAllocForSerializedWarpReplay(buffer)) {
+        const ThreadLaunchFrame* thread_idx_x = CurrentThreadIdxXFrame();
+        ICHECK(thread_idx_x != nullptr && thread_idx_x->extent.has_value())
+            << "local.var backing requires a static threadIdx.x launch";
+        ICHECK(!active_thread_local_bindings_stack_.empty())
+            << "local.var backing requires an active thread-local binding scope";
+        Array<PrimExpr> backing_shape;
+        backing_shape.push_back(IntImm(DataType::Int(32), thread_idx_x->extent.value()));
+        if (!IsScalarLocalVarBuffer(buffer)) {
+          for (const PrimExpr& dim : buffer->shape) {
+            backing_shape.push_back(dim);
+          }
+        }
+        ThreadLocalBlockAllocBinding binding{buffer, CreateAlloca(backing_shape, buffer->dtype)};
+        if (std::optional<PrimExpr> init =
+                LookupLocalVarInitFromAnnotations(op->annotations, buffer->data)) {
+          InitializeThreadLocalBackingFromExpr(
+              binding.backing, buffer, backing_shape[0], init);
+        } else if (std::optional<PrimExpr> init = LookupLocalVarInitForDataVar(buffer->data)) {
+          InitializeThreadLocalBackingFromExpr(
+              binding.backing, buffer, backing_shape[0], init);
+        } else {
+          InitializeThreadLocalBackingFromExpr(binding.backing, buffer, backing_shape[0],
+                                              std::nullopt);
+        }
+        active_thread_local_bindings_stack_.back().push_back(binding);
+        mlir::Value subview = CreateThreadLocalBlockAllocSubview(
+            binding, CurrentThreadIdxXValue("local.var thread-local backing"));
+        BindBufferAliases(buffer, subview, &saved_bindings, &saved_buffer_owners);
+        ++prebound_thread_local_block_buffers_[buffer.get()];
+        ++prebound_thread_local_block_buffers_[buffer->data.get()];
+        scoped_thread_local_keys.push_back(buffer.get());
+        scoped_thread_local_keys.push_back(buffer->data.get());
+        continue;
+      }
       if (InSingleNonUnitThreadIdxXRegion() &&
           (cooperative_replay_buffers.count(buffer.get()) != 0 ||
            cooperative_replay_buffers.count(buffer->data.get()) != 0) &&
@@ -9815,10 +10181,23 @@ private:
             << "thread-local replay backing requires an active thread-local binding scope";
         Array<PrimExpr> backing_shape;
         backing_shape.push_back(IntImm(DataType::Int(32), thread_idx_x->extent.value()));
-        for (const PrimExpr& dim : buffer->shape) {
-          backing_shape.push_back(dim);
+        if (!IsScalarLocalVarBuffer(buffer)) {
+          for (const PrimExpr& dim : buffer->shape) {
+            backing_shape.push_back(dim);
+          }
         }
         ThreadLocalBlockAllocBinding binding{buffer, CreateAlloca(backing_shape, buffer->dtype)};
+        if (std::optional<PrimExpr> init =
+                LookupLocalVarInitFromAnnotations(op->annotations, buffer->data)) {
+          InitializeThreadLocalBackingFromExpr(
+              binding.backing, buffer, backing_shape[0], init);
+        } else if (std::optional<PrimExpr> init = LookupLocalVarInitForDataVar(buffer->data)) {
+          InitializeThreadLocalBackingFromExpr(
+              binding.backing, buffer, backing_shape[0], init);
+        } else {
+          InitializeThreadLocalBackingFromExpr(binding.backing, buffer, backing_shape[0],
+                                              std::nullopt);
+        }
         active_thread_local_bindings_stack_.back().push_back(binding);
         mlir::Value subview = CreateThreadLocalBlockAllocSubview(
             binding, CurrentThreadIdxXValue("thread-local replay block allocation"));
@@ -10350,6 +10729,7 @@ private:
   BufferOwnerMap buffer_owner_;
   std::unordered_map<const Object*, std::vector<DeferredLoopBindings>> deferred_loop_bindings_;
   std::unordered_map<const Object*, int> prebound_thread_local_block_buffers_;
+  std::unordered_map<const Object*, mlir::Value> active_thread_local_backings_;
   std::unordered_set<std::string> pointer_backed_buffer_view_helpers_;
   std::optional<mlir::Value> active_rng_state_;
   std::vector<std::vector<ThreadLocalBlockAllocBinding>> active_thread_local_bindings_stack_;

@@ -30,6 +30,10 @@ class _MemRefParam:
     def rank(self) -> int:
         return len(self.shape)
 
+    @property
+    def is_fp4(self) -> bool:
+        return False
+
 
 @dataclass(frozen=True)
 class _ScalarParam:
@@ -53,6 +57,7 @@ class RiscvRunnerNotFoundError(RiscvRunnerError):
 
 
 _QEMU_OUTPUT_MAGIC = b"TLRVQ001"
+_RETAINED_HOST_LIBRARY_TEMPDIRS: list[tempfile.TemporaryDirectory[str]] = []
 
 
 def _run_checked(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -71,6 +76,262 @@ def _run_checked_binary(cmd: list[str]) -> subprocess.CompletedProcess[bytes]:
         message = stderr or stdout or "unknown tool failure"
         raise RiscvRunnerError(f"`{' '.join(cmd)}` failed: {message}")
     return proc
+
+
+_PTR_TO_MEMREF_DECL_RE = re.compile(
+    r"declare\s+\{\s*ptr,\s*ptr,\s*i64,\s*\[(?P<rank>\d+)\s+x\s+i64\],\s*"
+    r"\[(?P=rank)\s+x\s+i64\]\s*\}\s+@(?P<name>tilelang_riscv_ptr_i64_to_memref_[^(]+)"
+    r"\((?P<args>[^)]*)\)"
+)
+
+
+def _decode_ptr_to_memref_shape(symbol: str) -> list[int | None]:
+    marker = "_r"
+    rank_pos = symbol.rfind(marker)
+    if rank_pos < 0:
+        raise ValueError(f"Malformed pointer-backed memref helper symbol: {symbol}")
+    rest = symbol[rank_pos + len(marker) :]
+    pieces = rest.split("_")
+    if not pieces or not pieces[0].isdigit():
+        raise ValueError(f"Malformed pointer-backed memref helper rank: {symbol}")
+    shape: list[int | None] = []
+    i = 1
+    while i < len(pieces):
+        tag = pieces[i]
+        if tag == "d":
+            shape.append(None)
+            i += 1
+            continue
+        if tag.startswith("s") and len(tag) > 1:
+            shape.append(int(tag[1:]))
+            i += 1
+            continue
+        if tag == "s" and i + 1 < len(pieces):
+            shape.append(int(pieces[i + 1]))
+            i += 2
+            continue
+        raise ValueError(f"Malformed pointer-backed memref helper shape: {symbol}")
+    if len(shape) != int(pieces[0]):
+        raise ValueError(f"Pointer-backed memref helper rank/shape mismatch: {symbol}")
+    return shape
+
+
+def _row_major_strides(shape_exprs: list[str]) -> list[str]:
+    strides = ["1"] * len(shape_exprs)
+    running = "1"
+    for i in range(len(shape_exprs) - 1, -1, -1):
+        strides[i] = running
+        running = f"({running}) * ({shape_exprs[i]})"
+    return strides
+
+
+def _emit_ptr_to_memref_helpers(llvm_ir: str) -> str:
+    definitions: list[str] = [
+        "#include <stdint.h>",
+        "",
+    ]
+    seen: set[str] = set()
+    emitted_structs: set[str] = set()
+    for match in _PTR_TO_MEMREF_DECL_RE.finditer(llvm_ir):
+        symbol = match.group("name")
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        rank = int(match.group("rank"))
+        shape = _decode_ptr_to_memref_shape(symbol)
+        dyn_arg_count = sum(dim is None for dim in shape)
+        struct_name = f"tilelang_riscv_memref_r{rank}"
+        if struct_name not in emitted_structs:
+            emitted_structs.add(struct_name)
+            definitions.extend(
+                [
+                    f"struct {struct_name} {{",
+                    "  void* allocated;",
+                    "  void* aligned;",
+                    "  int64_t offset;",
+                    f"  int64_t sizes[{rank}];",
+                    f"  int64_t strides[{rank}];",
+                    "};",
+                    "",
+                ]
+            )
+        args = ["int64_t raw_addr"] + [f"int64_t d{i}" for i in range(dyn_arg_count)]
+        shape_exprs: list[str] = []
+        dyn_index = 0
+        for dim in shape:
+            if dim is None:
+                shape_exprs.append(f"d{dyn_index}")
+                dyn_index += 1
+            else:
+                shape_exprs.append(str(dim))
+        stride_exprs = _row_major_strides(shape_exprs)
+        definitions.extend(
+            [
+                f"struct {struct_name} {symbol}({', '.join(args)}) {{",
+                f"  struct {struct_name} result;",
+                "  result.allocated = (void*)(uintptr_t)raw_addr;",
+                "  result.aligned = (void*)(uintptr_t)raw_addr;",
+                "  result.offset = 0;",
+            ]
+        )
+        for i, expr in enumerate(shape_exprs):
+            definitions.append(f"  result.sizes[{i}] = {expr};")
+        for i, expr in enumerate(stride_exprs):
+            definitions.append(f"  result.strides[{i}] = {expr};")
+        definitions.extend(
+            [
+                "  return result;",
+                "}",
+                "",
+            ]
+        )
+    return "\n".join(definitions) if seen else ""
+
+
+def _emit_f8_conversion_helpers(llvm_ir: str) -> str:
+    needed = {
+        "tilelang_riscv_f8e4m3fnuz_to_f32": "tilelang_riscv_f8e4m3fnuz_to_f32" in llvm_ir,
+        "tilelang_riscv_f32_to_f8e4m3fnuz": "tilelang_riscv_f32_to_f8e4m3fnuz" in llvm_ir,
+        "tilelang_riscv_f8e4m3fn_to_f32": "tilelang_riscv_f8e4m3fn_to_f32" in llvm_ir,
+        "tilelang_riscv_f32_to_f8e4m3fn": "tilelang_riscv_f32_to_f8e4m3fn" in llvm_ir,
+    }
+    if not any(needed.values()):
+        return ""
+
+    definitions = [
+        "#include <stdint.h>",
+        "",
+        "static float tilelang_riscv_pow2_i32(int exp) {",
+        "  float value = 1.0f;",
+        "  if (exp >= 0) {",
+        "    for (int i = 0; i < exp; ++i) value *= 2.0f;",
+        "  } else {",
+        "    for (int i = 0; i < -exp; ++i) value *= 0.5f;",
+        "  }",
+        "  return value;",
+        "}",
+        "",
+        "static float tilelang_riscv_decode_e4m3(uint8_t raw, int bias, int fnuz) {",
+        "  if ((raw & 0x7f) == 0) return 0.0f;",
+        "  if (fnuz && raw == 0x80) return 0.0f;",
+        "  int sign = (raw & 0x80) ? -1 : 1;",
+        "  int exp = (raw >> 3) & 0x0f;",
+        "  int mant = raw & 0x07;",
+        "  float value;",
+        "  if (exp == 0) {",
+        "    value = ((float)mant / 8.0f) * tilelang_riscv_pow2_i32(1 - bias);",
+        "  } else {",
+        "    value = (1.0f + (float)mant / 8.0f) * tilelang_riscv_pow2_i32(exp - bias);",
+        "  }",
+        "  return sign < 0 ? -value : value;",
+        "}",
+        "",
+        "static uint8_t tilelang_riscv_encode_e4m3(float value, int bias, int fnuz) {",
+        "  if (!(value == value) || value == 0.0f) return 0;",
+        "  float best_diff = 3.4028234663852886e38f;",
+        "  uint8_t best = 0;",
+        "  for (int code = 0; code < 256; ++code) {",
+        "    if (fnuz && code == 0x80) continue;",
+        "    float decoded = tilelang_riscv_decode_e4m3((uint8_t)code, bias, fnuz);",
+        "    float diff = decoded - value;",
+        "    if (diff < 0.0f) diff = -diff;",
+        "    if (diff < best_diff || (diff == best_diff && (code & 1) == 0 && (best & 1) != 0)) {",
+        "      best_diff = diff;",
+        "      best = (uint8_t)code;",
+        "    }",
+        "  }",
+        "  return best;",
+        "}",
+        "",
+    ]
+    if needed["tilelang_riscv_f8e4m3fnuz_to_f32"]:
+        definitions.extend(
+            [
+                "float tilelang_riscv_f8e4m3fnuz_to_f32(uint8_t raw) {",
+                "  return tilelang_riscv_decode_e4m3(raw, 7, 1);",
+                "}",
+                "",
+            ]
+        )
+    if needed["tilelang_riscv_f32_to_f8e4m3fnuz"]:
+        definitions.extend(
+            [
+                "uint8_t tilelang_riscv_f32_to_f8e4m3fnuz(float value) {",
+                "  return tilelang_riscv_encode_e4m3(value, 7, 1);",
+                "}",
+                "",
+            ]
+        )
+    if needed["tilelang_riscv_f8e4m3fn_to_f32"]:
+        definitions.extend(
+            [
+                "float tilelang_riscv_f8e4m3fn_to_f32(uint8_t raw) {",
+                "  return tilelang_riscv_decode_e4m3(raw, 7, 0);",
+                "}",
+                "",
+            ]
+        )
+    if needed["tilelang_riscv_f32_to_f8e4m3fn"]:
+        definitions.extend(
+            [
+                "uint8_t tilelang_riscv_f32_to_f8e4m3fn(float value) {",
+                "  return tilelang_riscv_encode_e4m3(value, 7, 0);",
+                "}",
+                "",
+            ]
+        )
+    return "\n".join(definitions)
+
+
+def _emit_f4_conversion_helpers(llvm_ir: str) -> str:
+    need_decode = "tilelang_riscv_f4e2m1fn_to_f32" in llvm_ir
+    need_encode = "tilelang_riscv_f32_to_f4e2m1fn" in llvm_ir
+    if not need_decode and not need_encode:
+        return ""
+    definitions = [
+        "#include <stdint.h>",
+        "",
+        "float tilelang_riscv_f4e2m1fn_to_f32(uint8_t raw) {",
+        "  raw &= 0x0f;",
+        "  float sign = (raw & 0x08) ? -1.0f : 1.0f;",
+        "  int exp = (raw >> 1) & 0x03;",
+        "  int mant = raw & 0x01;",
+        "  float value = 0.0f;",
+        "  if (exp == 0) {",
+        "    value = 0.5f * (float)mant;",
+        "  } else {",
+        "    float pow2 = exp == 1 ? 1.0f : (exp == 2 ? 2.0f : 4.0f);",
+        "    value = (1.0f + 0.5f * (float)mant) * pow2;",
+        "  }",
+        "  return sign * value;",
+        "}",
+        "",
+        "uint8_t tilelang_riscv_f32_to_f4e2m1fn(float value) {",
+        "  float best_diff = 3.4028234663852886e38f;",
+        "  uint8_t best = 0;",
+        "  for (int code = 0; code < 16; ++code) {",
+        "    float decoded = tilelang_riscv_f4e2m1fn_to_f32((uint8_t)code);",
+        "    float diff = decoded - value;",
+        "    if (diff < 0.0f) diff = -diff;",
+        "    if (diff < best_diff || (diff == best_diff && (code & 1) == 0 && (best & 1) != 0)) {",
+        "      best_diff = diff;",
+        "      best = (uint8_t)code;",
+        "    }",
+        "  }",
+        "  return best;",
+        "}",
+        "",
+    ]
+    return "\n".join(definitions)
+
+
+def _emit_host_helper_source(llvm_ir: str) -> str:
+    helper_parts = [
+        _emit_ptr_to_memref_helpers(llvm_ir),
+        _emit_f8_conversion_helpers(llvm_ir),
+        _emit_f4_conversion_helpers(llvm_ir),
+    ]
+    return "\n".join(part for part in helper_parts if part)
 
 
 def _split_top_level(text: str, delimiter: str = ",") -> list[str]:
@@ -100,6 +361,8 @@ def _split_top_level(text: str, delimiter: str = ",") -> list[str]:
 
 
 def _dtype_token_to_numpy(dtype_token: str) -> np.dtype:
+    if dtype_token == "f4E2M1FN":
+        return np.dtype(np.int8)
     if dtype_token == "f16":
         return np.dtype(np.float16)
     if dtype_token == "f32":
@@ -108,14 +371,8 @@ def _dtype_token_to_numpy(dtype_token: str) -> np.dtype:
         return np.dtype(np.float64)
     if dtype_token == "bf16":
         return np.dtype("bfloat16")
-    if dtype_token == "f8E4M3FN":
-        return np.dtype("float8_e4m3fn")
-    if dtype_token == "f8E5M2":
-        return np.dtype("float8_e5m2")
-    if dtype_token == "f8E4M3FNUZ":
-        return np.dtype("float8_e4m3fnuz")
-    if dtype_token == "f8E5M2FNUZ":
-        return np.dtype("float8_e5m2fnuz")
+    if dtype_token in ("f8E4M3FN", "f8E5M2", "f8E4M3FNUZ", "f8E5M2FNUZ"):
+        return np.dtype(np.uint8)
     if dtype_token == "i1":
         return np.dtype(np.bool_)
     if dtype_token == "index":
@@ -200,6 +457,24 @@ def _parse_function_signatures(mlir_source: str) -> list[_FunctionSignature]:
                 _, type_text = param_text.split(":", maxsplit=1)
                 params.append(_parse_param_type(type_text))
         signatures.append(_FunctionSignature(name=match.group("name"), params=tuple(params)))
+    generic_matches = re.finditer(
+        r'"func\.func"\(\)\s*<\{(?P<attrs>.*?)\}>\s*\(',
+        mlir_source,
+        flags=re.DOTALL,
+    )
+    for match in generic_matches:
+        attrs = match.group("attrs")
+        name_match = re.search(r'sym_name\s*=\s*"(?P<name>[\w$.-]+)"', attrs)
+        type_match = re.search(r"function_type\s*=\s*\((?P<params>.*?)\)\s*->", attrs, flags=re.DOTALL)
+        if name_match is None or type_match is None:
+            continue
+        params_text = type_match.group("params").strip()
+        params: list[_MemRefParam | _ScalarParam] = []
+        if params_text:
+            for type_text in _split_top_level(params_text):
+                params.append(_parse_param_type(type_text))
+        if not any(signature.name == name_match.group("name") for signature in signatures):
+            signatures.append(_FunctionSignature(name=name_match.group("name"), params=tuple(params)))
     return signatures
 
 
@@ -231,12 +506,38 @@ def _normalize_memref_array(spec: _MemRefParam, value: Any) -> np.ndarray:
         raise ValueError(f"Expected rank-{spec.rank} array for {spec.mlir_type}, but got rank {array.ndim}")
     if not array.flags.c_contiguous:
         raise ValueError("Execution currently requires C-contiguous NumPy arrays")
-    for expected_dim, actual_dim in zip(spec.shape, array.shape):
+    expected_shape = _physical_memref_shape(spec)
+    for expected_dim, actual_dim in zip(expected_shape, array.shape):
         if expected_dim is not None and expected_dim != actual_dim:
             raise ValueError(
-                f"Expected shape {spec.shape} for {spec.mlir_type}, but got {tuple(int(dim) for dim in array.shape)}"
+                f"Expected shape {expected_shape} for {spec.mlir_type}, but got {tuple(int(dim) for dim in array.shape)}"
             )
     return array
+
+
+def _physical_memref_shape(spec: _MemRefParam) -> tuple[int | None, ...]:
+    if not spec.is_fp4 or not spec.shape:
+        return spec.shape
+    shape = list(spec.shape)
+    last = shape[-1]
+    shape[-1] = None if last is None else (last + 1) // 2
+    return tuple(shape)
+
+
+def _logical_memref_shape(spec: _MemRefParam, array: np.ndarray) -> list[int]:
+    shape = [int(dim) for dim in array.shape]
+    if spec.is_fp4 and shape:
+        shape[-1] *= 2
+    return shape
+
+
+def _logical_row_major_strides(shape: list[int]) -> list[int]:
+    strides = [1] * len(shape)
+    running = 1
+    for i in range(len(shape) - 1, -1, -1):
+        strides[i] = running
+        running *= shape[i]
+    return strides
 
 
 def _normalize_scalar_value(spec: _ScalarParam, value: Any) -> Any:
@@ -611,6 +912,7 @@ def build_host_shared_library(
         temp_dir_path = Path(temp_dir)
         ll_path = temp_dir_path / f"{out_path.stem}.ll"
         ll_path.write_text(llvm_ir)
+        helper_source = _emit_host_helper_source(llvm_ir)
         cmd = [
             str(resolve_tool("clang")),
             "-shared",
@@ -627,6 +929,11 @@ def build_host_shared_library(
             "-lmlir_c_runner_utils",
             "-lmlir_runner_utils",
         ]
+        if helper_source:
+            helper_path = temp_dir_path / f"{out_path.stem}_ptr_helpers.c"
+            helper_path.write_text(helper_source)
+            out_flag_index = cmd.index("-o")
+            cmd[out_flag_index:out_flag_index] = ["-x", "c", str(helper_path)]
         active_triple = triple or resolve_host_triple()
         if active_triple:
             cmd.extend(["-target", active_triple])
@@ -656,7 +963,9 @@ class HostKernelLibrary:
 
     def close(self) -> None:
         if self._owned_tempdir is not None:
-            self._owned_tempdir.cleanup()
+            # ctypes does not expose a portable dlclose. Keep the directory alive
+            # while the process may still hold the shared object mapped.
+            _RETAINED_HOST_LIBRARY_TEMPDIRS.append(self._owned_tempdir)
             self._owned_tempdir = None
 
     def __del__(self) -> None:
@@ -679,9 +988,10 @@ class HostKernelLibrary:
     def _flatten_memref_arg(self, spec: _MemRefParam, value: Any) -> list[Any]:
         array = _normalize_memref_array(spec, value)
         ptr = array.ctypes.data
-        strides = [stride // array.dtype.itemsize for stride in array.strides]
+        shape = _logical_memref_shape(spec, array)
+        strides = _logical_row_major_strides(shape) if spec.is_fp4 else [stride // array.dtype.itemsize for stride in array.strides]
         flattened = [ctypes.c_void_p(ptr), ctypes.c_void_p(ptr), ctypes.c_int64(0)]
-        flattened.extend(ctypes.c_int64(int(dim)) for dim in array.shape)
+        flattened.extend(ctypes.c_int64(int(dim)) for dim in shape)
         flattened.extend(ctypes.c_int64(int(stride)) for stride in strides)
         return flattened
 
