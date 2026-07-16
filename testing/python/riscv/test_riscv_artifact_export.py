@@ -24,8 +24,8 @@ pytest.importorskip("tilelang.tladapter._native")
 def _build_mlir_module(source: str, global_symbol: str):
     func = tvm.script.from_source(source).with_attr("global_symbol", global_symbol)
     mod = tvm.IRModule({global_symbol: func})
-    target = tvm.target.Target("linalg_riscv")
-    return func, tvm.ffi.get_global_func("target.build.tilelang_linalg_riscv")(mod, target)
+    target = tvm.target.Target("riscv")
+    return func, tvm.ffi.get_global_func("target.build.tilelang_riscv")(mod, target)
 
 
 def _build_copy_module():
@@ -126,7 +126,7 @@ def test_riscv_kernel_adapter_executes_copy_on_cpu_torch():
         adapter = RiscvKernelAdapter(
             params=params,
             result_idx=[1],
-            target="linalg_riscv",
+            target="riscv",
             func_or_mod=func,
             rt_mod=rt_mod,
         )

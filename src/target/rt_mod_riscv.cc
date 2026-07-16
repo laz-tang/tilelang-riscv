@@ -1,4 +1,4 @@
-#include "codegen_linalg_riscv.h"
+#include "codegen_riscv.h"
 
 #include <dmlc/memory_io.h>
 #include <tvm/ffi/extra/module.h>
@@ -102,13 +102,13 @@ ffi::Module MLIRSourceModuleCreate(const std::string &code,
   return ffi::Module(n);
 }
 
-ffi::Module BuildTileLangLinalgRISCV(IRModule mod, Target target) {
+ffi::Module BuildTileLangRISCV(IRModule mod, Target target) {
   (void)target;
   mod = tir::transform::LowerInitBlock()(mod);
-  CodeGenTileLangLinalgRISCV cg;
+  CodeGenTileLangRISCV cg;
   for (const auto &kv : mod->functions) {
     ICHECK(kv.second->IsInstance<tir::PrimFuncNode>())
-        << "CodeGenTileLangLinalgRISCV: Can only take PrimFunc";
+        << "CodeGenTileLangRISCV: Can only take PrimFunc";
     auto gvar = Downcast<GlobalVar>(kv.first);
     auto func = Downcast<tir::PrimFunc>(kv.second);
     cg.AddFunction(gvar, func);
@@ -122,11 +122,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("ffi.Module.load_from_bytes.mlir",
                         MLIRSourceModuleNode::LoadFromBytes);
-  refl::GlobalDef().def("target.build.tilelang_linalg_riscv",
-                        BuildTileLangLinalgRISCV);
+  refl::GlobalDef().def("target.build.tilelang_riscv",
+                        BuildTileLangRISCV);
 }
 
-TVM_REGISTER_TARGET_KIND("linalg_riscv", kDLCPU);
+TVM_REGISTER_TARGET_KIND("riscv", kDLCPU);
 
 } // namespace codegen
 } // namespace tvm

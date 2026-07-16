@@ -6,8 +6,20 @@ import tilelang.language as T
 
 import pytest
 
+from tilelang.tladapter.toolchain import resolve_llvm_root
+
 
 pytest.importorskip("tilelang.tladapter._native")
+if resolve_llvm_root(required=False) is None:
+    pytest.skip("LLVM/MLIR runtime toolchain not available", allow_module_level=True)
+
+
+def _has_transpose_b_matmul(source: str) -> bool:
+    return "linalg.matmul_transpose_b" in source or (
+        "linalg.matmul indexing_maps" in source
+        and "affine_map<(d0, d1, d2) -> (d0, d2)>" in source
+        and "affine_map<(d0, d1, d2) -> (d1, d2)>" in source
+    )
 
 
 N = 8
@@ -100,7 +112,7 @@ def test_tilelang_compile_runs_riscv_host_adapter_with_transpose_b_gemm():
     out = kernel(lhs, rhs)
     kernel.close()
 
-    assert "linalg.matmul_transpose_b" in kernel.get_kernel_source()
+    assert _has_transpose_b_matmul(kernel.get_kernel_source())
     torch.testing.assert_close(out, lhs @ rhs.transpose(0, 1))
 
 
@@ -129,7 +141,7 @@ def test_tilelang_compile_runs_riscv_host_adapter_with_transpose_a_and_b_gemm():
     out = kernel(lhs, rhs)
     kernel.close()
 
-    assert "linalg.matmul_transpose_b" in kernel.get_kernel_source()
+    assert _has_transpose_b_matmul(kernel.get_kernel_source())
     torch.testing.assert_close(out, lhs.transpose(0, 1) @ rhs.transpose(0, 1))
 
 

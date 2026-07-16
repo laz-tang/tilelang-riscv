@@ -18,8 +18,7 @@ the generated code. The most frequent choices are listed below:
 | `hip` | AMD GPUs via ROCm. Options like `-mcpu=gfx90a` can be appended. |
 | `metal` | Apple Silicon GPUs (arm64 Macs). |
 | `llvm` | CPU execution; accepts the standard TVM LLVM switches. |
-| `riscv` | Alias for the structured MLIR-backed RISC-V backend. Internally normalised to `linalg_riscv`. |
-| `linalg_riscv` | Structured MLIR pipeline for RISC-V execution. Intended for MLIR lowering through Buddy/LLVM and native RVV execution. |
+| `riscv` | Structured MLIR pipeline for RISC-V execution. Intended for MLIR lowering through Buddy/LLVM and native RVV execution. |
 | `webgpu` | Browser / WebGPU runtimes. |
 | `c` | Emit plain C source for inspection or custom toolchains. |
 
@@ -35,7 +34,7 @@ def compiled_kernel(*args):
 ```
 
 The same convention works for HIP, LLVM, or the RISC-V MLIR backend (e.g. `hip -mcpu=gfx940`,
-`llvm -mtriple=x86_64-linux-gnu`, `linalg_riscv -mtriple=riscv64-unknown-linux-gnu`).
+`llvm -mtriple=x86_64-linux-gnu`, `riscv -mtriple=riscv64-unknown-linux-gnu`).
 
 ## RISC-V structured backend
 
@@ -43,15 +42,13 @@ TileLang also exposes a structured MLIR-backed backend for RISC-V bring-up:
 
 ```python
 kernel = tilelang.compile(func, target="riscv")
-# equivalent:
-kernel = tilelang.compile(func, target="linalg_riscv")
 ```
 
 This path is intentionally different from the CUDA/HIP/Metal backends:
 
 - TileLang lowers TIR into a structured MLIR module.
 - The Python runtime adapter then lowers through `mlir-opt`/`mlir-translate`/`llc`.
-- Native execution can target a real RISC-V machine by setting up an LLVM/MLIR toolchain and a local Z3 install.
+- Native execution can target a real RISC-V machine by setting up an LLVM/MLIR toolchain and a native RISC-V C/C++ toolchain.
 
 The intended shared path here is `TileLang -> MLIR Linalg -> MLIR vector/RVV lowering`. This document does not assume
 shared Triton frontend lowering passes; the commonality starts at the Linalg/downstream MLIR pipeline.
@@ -76,7 +73,7 @@ supported on RISC-V.
 - the verified flow is `TileLang -> MLIR Linalg -> MLIR lowering -> native host adapter -> SG2044 execution`
 - x86 is sufficient for source review and compiler-path review, but not for RVV execution validation
 - first-time optional Torch DLPack extension builds can be avoided with `TVM_FFI_DISABLE_TORCH_C_DLPACK=1`
-- keep `target="riscv"` as the public spelling; `linalg_riscv` is the internal canonical target name
+- use `target="riscv"` as the only supported target spelling for this backend
 
 ### Advanced: Specify Exact Hardware
 

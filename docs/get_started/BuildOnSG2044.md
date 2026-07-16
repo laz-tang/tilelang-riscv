@@ -14,6 +14,22 @@ The validated flow is:
 
 This document is about native execution on SG2044.
 
+## Get the Sources
+
+Clone the repository with its bundled dependencies, including the `TileKernels`
+submodule used by the RISC-V operator-library tests:
+
+```bash
+git clone --recursive https://github.com/tile-ai/tilelang.git tilelang-riscv
+cd tilelang-riscv
+```
+
+If you already cloned the repository without submodules, run:
+
+```bash
+git submodule update --init --recursive
+```
+
 ## Environment Setup
 
 Activate the Python environment and export the toolchain variables:
@@ -25,6 +41,8 @@ export TILELANG_RISCV_LLVM_ROOT=/path/to/buddy-mlir/llvm/build
 export Z3_ROOT=/path/to/.local/z3
 export CC=/path/to/gcc
 export CXX=/path/to/g++
+export PATH=/path/to/gcc-bin:$TILELANG_RISCV_LLVM_ROOT/bin:$Z3_ROOT/bin:$PATH
+export LIBRARY_PATH=/path/to/gcc-lib64/lp64d:/path/to/gcc-libgcc/lp64d${LIBRARY_PATH:+:$LIBRARY_PATH}
 export TVM_FFI_DISABLE_TORCH_C_DLPACK=1
 export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=OFF"
 ```
@@ -32,7 +50,11 @@ export CMAKE_ARGS="-DUSE_CUDA=OFF -DUSE_ROCM=OFF"
 Notes:
 
 - `Z3_ROOT` is required when `z3-solver` wheels are unavailable on `riscv64`
+- if the native toolchain uses a split `lib64/lp64d` layout, include it in
+  `LIBRARY_PATH` or CMake's compiler sanity check can fail on `-lgcc_s`
 - `TVM_FFI_DISABLE_TORCH_C_DLPACK=1` avoids first-import JIT building of the optional Torch DLPack extension
+- `torch-c-dlpack-ext` is skipped on `riscv64`; the validated SG2044 flow uses
+  TVM FFI without that optional prebuilt extension
 
 ## Install Dependencies
 
@@ -60,7 +82,7 @@ pip install -e . --no-build-isolation -v
 
 The SG2044 path depends on a few implementation details that are already wired into this tree:
 
-- `target="riscv"` is normalised to `linalg_riscv`
+- use `target="riscv"` as the backend name
 - toolchain discovery covers sibling Buddy builds such as `../buddy-mlir/llvm/build`
 - the RISC-V host wrapper passes `--gcc-toolchain` and `--sysroot` when it detects `/opt/gcc-native`
 - RISC-V builds disable TVM's alternative linker selection because `ld.lld` failed on the validated SG2044 toolchain
@@ -79,21 +101,29 @@ The validated native test set is:
 ```bash
 cd tilelang-riscv
 pytest testing/python/riscv/test_riscv_target_parse.py -q
-pytest testing/python/riscv/test_riscv_mlir_codegen.py -q
 pytest testing/python/riscv/test_riscv_toolchain.py -q
-pytest testing/python/riscv/test_riscv_jit_runtime.py -q
+pytest testing/python/riscv/test_riscv_tladapter_pipeline.py -q
+pytest testing/python/riscv/test_riscv_cache.py -q
+pytest testing/python/riscv/codegen_ops -q
+pytest testing/python/riscv/TileKernels -q
 ```
 
-Observed results from the validated SG2044 bring-up:
+Useful extended runtime checks:
 
-- `test_riscv_target_parse.py`: `2 passed`
-- `test_riscv_mlir_codegen.py`: `33 passed`
-- `test_riscv_toolchain.py`: `3 passed`
-- `test_riscv_jit_runtime.py`: `16 passed`
+```bash
+pytest testing/python/riscv/test_riscv_jit_runtime.py -q
+pytest testing/python/riscv/test_riscv_artifact_export.py -q
+```
+
+`test_riscv_jit_runtime.py` and `test_riscv_artifact_export.py` exercise broader
+runtime and artifact-export paths and may expose additional toolchain or runtime
+issues beyond the smoke set above.
 
 ## Troubleshooting
 
 - If configuration fails with a Z3 lookup error, check that `Z3_ROOT` points to a prefix containing `include` and `lib`
+- If the first CMake configure fails on `-lgcc_s`, verify that the toolchain's
+  `lib64/lp64d` directory is present in `LIBRARY_PATH`
 - If runtime shared library linking fails, verify that `CC`, `CXX`, and `/opt/gcc-native/sysroot` are all present
 - If `tvm_ffi` import fails, reinstall the vendored package from `3rdparty/tvm/3rdparty/tvm-ffi`
 - If first import becomes slow or tries to build extra Torch extensions, keep `TVM_FFI_DISABLE_TORCH_C_DLPACK=1`

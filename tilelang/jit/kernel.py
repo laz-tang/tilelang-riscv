@@ -262,7 +262,7 @@ class JITKernel(Generic[_P, _T]):
         # Create an adapter based on the specified execution backend.
         if execution_backend == "tvm_ffi":
             assert artifact.rt_mod is not None, "tvm_ffi backend requires a runtime module."
-            if self.target.kind.name == "linalg_riscv":
+            if self.target.kind.name == "riscv":
                 adapter = RiscvKernelAdapter(
                     params=artifact.params,
                     result_idx=out_idx,
@@ -369,7 +369,7 @@ class JITKernel(Generic[_P, _T]):
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "tvm_ffi":
-            if target.kind.name == "linalg_riscv":
+            if target.kind.name == "riscv":
                 adapter = RiscvKernelAdapter.from_database(
                     params=params,
                     result_idx=result_idx,

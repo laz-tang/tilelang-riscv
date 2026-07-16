@@ -6,8 +6,8 @@ from tilelang.transform import PassContext
 from tilelang.contrib.nvcc import have_tma, have_pdl
 
 
-def is_linalg_riscv_target(target: Target | None) -> bool:
-    return target is not None and target.kind.name == "linalg_riscv"
+def is_riscv_target(target: Target | None) -> bool:
+    return target is not None and target.kind.name == "riscv"
 
 
 def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
@@ -136,7 +136,7 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
 
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
-    if is_linalg_riscv_target(target):
+    if is_riscv_target(target):
         mod = tir.transform.BindTarget(target)(mod)
         mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
         mod = tilelang.transform.LegalizeNegativeIndex()(mod)
@@ -240,8 +240,13 @@ def LowerAndLegalizeForRISCV(mod: IRModule, target: Target) -> IRModule:
     return LowerAndLegalize(mod, target)
 
 
+def _lower_thread_allreduce(mod: IRModule) -> IRModule:
+    mod = tir.transform.InferFragment()(mod)
+    return tilelang.transform.LowerThreadAllreduce()(mod)
+
+
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
-    if is_linalg_riscv_target(target):
+    if is_riscv_target(target):
         mod = tir.transform.LowerInitBlock()(mod)
         mod = tir.transform.Simplify()(mod)
         mod = tir.transform.RemoveNoOp()(mod)
@@ -280,17 +285,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
 
     mod = tir.transform.VerifyMemory()(mod)
     mod = tir.transform.AnnotateEntryFunc()(mod)
-    # TODO(lei): This is a hack to make sure the
-    # thread level allreduce pass can be applied
-    # in TL. As Tl only use one thread dimension
-    # the var binding information will be lost
-    # in the lowering process with Legalization
-    # and Simplify pass.
-    # We can find a way better to create var instead
-    # of putting the LowerThreadAllreduce before
-    # the Legalization.
-    mod = tir.transform.InferFragment()(mod)
-    mod = tilelang.transform.LowerThreadAllreduce()(mod)
+    mod = _lower_thread_allreduce(mod)
     mod = tilelang.transform.LowerLDGSTG()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
     # Global Barrier Synchronization must be applied before
