@@ -12,6 +12,8 @@ This directory contains TileLang RISC-V backend tests.
 - `TileKernels/`: runtime correctness tests for selected TileKernels kernels.
   Each test compiles with `target="riscv"`, executes through the RISC-V host
   adapter, and compares against a CPU/PyTorch reference.
+- `TileOps/`: runtime correctness tests for selected TileOps kernels.  See
+  `TileOps/README.md` for the current coverage.
 
 ## Run
 
@@ -31,4 +33,10 @@ TileKernels runtime tests:
 
 ```bash
 python -m pytest -q testing/python/riscv/TileKernels
+```
+
+TileOps runtime tests:
+
+```bash
+python -m pytest -q testing/python/riscv/TileOps
 ```
