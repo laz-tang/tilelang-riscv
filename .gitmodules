@@ -10,3 +10,6 @@
 [submodule "3rdparty/TileKernels"]
 	path = 3rdparty/TileKernels
 	url = https://github.com/deepseek-ai/TileKernels.git
+[submodule "3rdparty/TileOPs"]
+	path = 3rdparty/TileOPs
+	url = https://github.com/tile-ai/TileOPs.git

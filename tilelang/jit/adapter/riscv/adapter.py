@@ -184,7 +184,14 @@ class RiscvKernelAdapter(BaseKernelAdapter):
     def _host_storage_torch_dtype(self, param: KernelParam) -> torch.dtype:
         if param.is_float4():
             return torch.int8
+        if param.torch_dtype() == torch.uint8:
+            return torch.int8
         return param.torch_dtype()
+
+    def _restore_result_torch_dtype(self, tensor: torch.Tensor, param: KernelParam) -> torch.Tensor:
+        if param.torch_dtype() == torch.uint8 and tensor.dtype == torch.int8:
+            return tensor.view(torch.uint8)
+        return tensor
 
     def _host_storage_shape(self, param: KernelParam, provided_args: dict[int, Any]) -> list[int]:
         return self._resolve_output_shape(param, provided_args)
@@ -230,8 +237,12 @@ class RiscvKernelAdapter(BaseKernelAdapter):
             self._get_host_library()(*native_args)
 
             if len(self.result_idx) == 1:
-                return host_args[self.result_idx[0]]
-            return [host_args[i] for i in self.result_idx]
+                result_idx = self.result_idx[0]
+                return self._restore_result_torch_dtype(host_args[result_idx], self.params[result_idx])
+            return [
+                self._restore_result_torch_dtype(host_args[i], self.params[i])
+                for i in self.result_idx
+            ]
 
         return func
 

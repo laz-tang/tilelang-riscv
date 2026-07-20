@@ -56,6 +56,7 @@ from .allocate import (
 )
 from tvm.script.parser.tir import allocate as allocate  # noqa: F401
 from .copy_op import copy, async_copy, tma_copy, transpose, c2d_im2col  # noqa: F401
+im2col = c2d_im2col
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
 from .gemm_op import gemm, wgmma_gemm, tcgen05_gemm  # noqa: F401
 from .experimental.gemm_sp import gemm_sp, gemm_sp_v2  # noqa: F401

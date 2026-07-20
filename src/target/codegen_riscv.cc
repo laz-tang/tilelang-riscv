@@ -7567,6 +7567,147 @@ private:
     LowerTileCopy(op);
   }
 
+  mlir::Value IndexConst(int64_t value) {
+    return ConstantIntLike(value, builder_.getIndexType());
+  }
+
+  mlir::Value IndexAdd(mlir::Value lhs, mlir::Value rhs) {
+    return builder_.create<mlir::arith::AddIOp>(loc_, lhs, rhs);
+  }
+
+  mlir::Value IndexSub(mlir::Value lhs, mlir::Value rhs) {
+    return builder_.create<mlir::arith::SubIOp>(loc_, lhs, rhs);
+  }
+
+  mlir::Value IndexMul(mlir::Value lhs, mlir::Value rhs) {
+    return builder_.create<mlir::arith::MulIOp>(loc_, lhs, rhs);
+  }
+
+  mlir::Value IndexDiv(mlir::Value lhs, mlir::Value rhs) {
+    return builder_.create<mlir::arith::DivUIOp>(loc_, lhs, rhs);
+  }
+
+  mlir::Value IndexRem(mlir::Value lhs, mlir::Value rhs) {
+    return builder_.create<mlir::arith::RemUIOp>(loc_, lhs, rhs);
+  }
+
+  mlir::Value IndexLt(mlir::Value lhs, mlir::Value rhs) {
+    return builder_.create<mlir::arith::CmpIOp>(loc_, mlir::arith::CmpIPredicate::slt, lhs, rhs);
+  }
+
+  mlir::Value IndexGe(mlir::Value lhs, mlir::Value rhs) {
+    return builder_.create<mlir::arith::CmpIOp>(loc_, mlir::arith::CmpIPredicate::sge, lhs, rhs);
+  }
+
+  mlir::Value BoolAnd(mlir::Value lhs, mlir::Value rhs) {
+    return builder_.create<mlir::arith::AndIOp>(loc_, lhs, rhs);
+  }
+
+  void LowerTileC2dIm2Col(const tir::CallNode* op) {
+    ICHECK(op != nullptr && op->args.size() >= 8U)
+        << "tl.tileop.c2d_im2col expects img, col, nhw_step, c_step, kernel, stride, "
+           "dilation, and pad arguments";
+    tir::BufferRegion img_region = tl::NormalizeToBufferRegion(op->args[0]);
+    tir::BufferRegion col_region = tl::NormalizeToBufferRegion(op->args[1]);
+    const tir::Buffer& img_buffer = img_region->buffer;
+    const tir::Buffer& col_buffer = col_region->buffer;
+    ICHECK_EQ(img_buffer->shape.size(), 4U)
+        << "tl.tileop.c2d_im2col currently expects an NHWC rank-4 input buffer";
+    ICHECK_EQ(col_buffer->shape.size(), 2U)
+        << "tl.tileop.c2d_im2col currently expects a rank-2 output tile";
+
+    int64_t n = GetStaticInt(img_buffer->shape[0], "tl.tileop.c2d_im2col input N");
+    int64_t h = GetStaticInt(img_buffer->shape[1], "tl.tileop.c2d_im2col input H");
+    int64_t w = GetStaticInt(img_buffer->shape[2], "tl.tileop.c2d_im2col input W");
+    int64_t c_in = GetStaticInt(img_buffer->shape[3], "tl.tileop.c2d_im2col input C");
+    int64_t kernel = GetStaticInt(op->args[4], "tl.tileop.c2d_im2col kernel");
+    int64_t stride = GetStaticInt(op->args[5], "tl.tileop.c2d_im2col stride");
+    int64_t dilation = GetStaticInt(op->args[6], "tl.tileop.c2d_im2col dilation");
+    int64_t pad = GetStaticInt(op->args[7], "tl.tileop.c2d_im2col pad");
+    ICHECK_GT(c_in, 0);
+    ICHECK_GT(kernel, 0);
+    ICHECK_GT(stride, 0);
+    ICHECK_GT(dilation, 0);
+    int64_t out_h = (h + 2 * pad - dilation * (kernel - 1) - 1) / stride + 1;
+    int64_t out_w = (w + 2 * pad - dilation * (kernel - 1) - 1) / stride + 1;
+    int64_t out_hw = out_h * out_w;
+    int64_t k_total = c_in * kernel * kernel;
+
+    mlir::Value img_memref = LookupBufferValue(img_buffer);
+    mlir::Value col_memref = LookupBufferValue(col_buffer);
+    mlir::Value block_m = AsIndex(VisitExpr(col_region->region[0]->extent),
+                                  col_region->region[0]->extent.dtype());
+    mlir::Value block_k = AsIndex(VisitExpr(col_region->region[1]->extent),
+                                  col_region->region[1]->extent.dtype());
+    mlir::Value nhw_step = AsIndex(VisitExpr(op->args[2]), op->args[2].dtype());
+    mlir::Value c_step = AsIndex(VisitExpr(op->args[3]), op->args[3].dtype());
+    mlir::Value zero = ZeroIndex();
+
+    EmitLoopNest(col_region->region, [&](llvm::ArrayRef<mlir::Value> coords) {
+      ICHECK_EQ(coords.size(), 2U);
+      mlir::Value local_m = coords[0];
+      mlir::Value local_k = coords[1];
+      mlir::Value spatial_idx = IndexAdd(IndexMul(nhw_step, block_m), local_m);
+      mlir::Value k_idx = IndexAdd(IndexMul(c_step, block_k), local_k);
+      mlir::Value n_idx = IndexDiv(spatial_idx, IndexConst(out_hw));
+      mlir::Value ohw_idx = IndexRem(spatial_idx, IndexConst(out_hw));
+      mlir::Value oh = IndexDiv(ohw_idx, IndexConst(out_w));
+      mlir::Value ow = IndexRem(ohw_idx, IndexConst(out_w));
+      mlir::Value rs_idx = IndexDiv(k_idx, IndexConst(c_in));
+      mlir::Value c_idx = IndexRem(k_idx, IndexConst(c_in));
+      mlir::Value r_idx = IndexDiv(rs_idx, IndexConst(kernel));
+      mlir::Value s_idx = IndexRem(rs_idx, IndexConst(kernel));
+      mlir::Value ih = IndexSub(
+          IndexAdd(IndexMul(oh, IndexConst(stride)), IndexMul(r_idx, IndexConst(dilation))),
+          IndexConst(pad));
+      mlir::Value iw = IndexSub(
+          IndexAdd(IndexMul(ow, IndexConst(stride)), IndexMul(s_idx, IndexConst(dilation))),
+          IndexConst(pad));
+
+      mlir::Value valid = IndexLt(spatial_idx, IndexConst(n * out_hw));
+      valid = BoolAnd(valid, IndexLt(k_idx, IndexConst(k_total)));
+      valid = BoolAnd(valid, IndexGe(ih, zero));
+      valid = BoolAnd(valid, IndexLt(ih, IndexConst(h)));
+      valid = BoolAnd(valid, IndexGe(iw, zero));
+      valid = BoolAnd(valid, IndexLt(iw, IndexConst(w)));
+
+      mlir::Value slot = CreateStaticAlloca({1}, col_buffer->dtype);
+      llvm::SmallVector<mlir::Value, 1> slot_indices{zero};
+      builder_.create<mlir::memref::StoreOp>(loc_, CreateZeroValue(col_buffer->dtype), slot,
+                                             slot_indices);
+      mlir::scf::IfOp if_op = builder_.create<mlir::scf::IfOp>(loc_, valid, false);
+      {
+        mlir::OpBuilder::InsertionGuard guard(builder_);
+        builder_.setInsertionPoint(if_op.thenBlock(), if_op.thenBlock()->begin());
+        llvm::SmallVector<mlir::Value, 4> img_indices{n_idx, ih, iw, c_idx};
+        mlir::Value value = builder_.create<mlir::memref::LoadOp>(loc_, img_memref, img_indices);
+        value = CastValue(value, img_buffer->dtype, col_buffer->dtype);
+        builder_.create<mlir::memref::StoreOp>(loc_, value, slot, slot_indices);
+      }
+      llvm::SmallVector<mlir::Value, 2> col_indices =
+          LowerRegionIndices(col_region, coords);
+      mlir::Value value = builder_.create<mlir::memref::LoadOp>(loc_, slot, slot_indices);
+      builder_.create<mlir::memref::StoreOp>(loc_, value, col_memref, col_indices);
+    });
+  }
+
+  void LowerSingleLaneThreadAllreduce(const tir::CallNode* op) {
+    ICHECK(op != nullptr && op->args.size() >= 4U)
+        << "tir.tvm_thread_allreduce expects reducer, value, predicate, and destination";
+    const auto* dst = op->args[3].as<tir::BufferLoadNode>();
+    ICHECK(dst != nullptr)
+        << "tir.tvm_thread_allreduce destination must be a BufferLoad in riscv lowering";
+    ValidateLowerableBufferLayout(dst->buffer);
+    mlir::Value dst_memref = LookupBufferValue(dst->buffer);
+    llvm::SmallVector<mlir::Value, 4> dst_indices;
+    dst_indices.reserve(dst->indices.size());
+    for (const PrimExpr& index : dst->indices) {
+      dst_indices.push_back(AsIndex(VisitExpr(index), index.dtype()));
+    }
+    mlir::Value value = CastValue(VisitExpr(op->args[1]), op->args[1].dtype(), dst->buffer->dtype);
+    builder_.create<mlir::memref::StoreOp>(loc_, value, dst_memref, dst_indices);
+  }
+
   const tir::CallNode* ResolveBoundCallExpr(const PrimExpr& expr) const {
     if (const auto* call = expr.as<tir::CallNode>()) {
       return call;
@@ -8453,6 +8594,10 @@ private:
       LowerRngInit(op);
       return true;
     }
+    if (op_node->name == "tir.tvm_thread_allreduce") {
+      LowerSingleLaneThreadAllreduce(op);
+      return true;
+    }
     if (op_node->name == "tl.tileop.async_copy") {
       LowerTileAsyncCopy(op);
       return true;
@@ -8576,6 +8721,10 @@ private:
 
     if (op_node->name == "tl.tileop.copy") {
       LowerTileCopy(op);
+      return true;
+    }
+    if (op_node->name == "tl.tileop.c2d_im2col") {
+      LowerTileC2dIm2Col(op);
       return true;
     }
     if (op_node->name == "tl.tileop.fill") {
@@ -10118,8 +10267,13 @@ private:
     saved_bindings.reserve(op->alloc_buffers.size() * 2 + op->match_buffers.size() * 2);
     saved_packed_owners.reserve(op->alloc_buffers.size());
     for (const tir::Buffer& buffer : op->alloc_buffers) {
-      if (InNonUnitLogicalThreadRegion() &&
-          (tl::IsSharedBuffer(buffer) || IsPreboundThreadLocalBlockBuffer(buffer))) {
+      // Shared buffers used by a phase-global operation (for example cumsum)
+      // are pre-bound before the phase is emitted, even though that phase is
+      // lowered outside the logical thread region. Reuse the existing binding
+      // instead of allocating a fresh, disconnected buffer.
+      if ((tl::IsSharedBuffer(buffer) && BufferIsBound(buffer)) ||
+          (InNonUnitLogicalThreadRegion() &&
+           IsPreboundThreadLocalBlockBuffer(buffer))) {
         mlir::Value alloc = LookupBufferValue(buffer);
         BindBufferAliases(buffer, alloc, &saved_bindings, &saved_buffer_owners);
         if (buffer->dtype.lanes() > 1) {
