@@ -27,8 +27,8 @@ def test_gqa_prefill_fwd_float32_runtime_compare():
         batch=batch,
         heads=heads,
         heads_kv=heads_kv,
-        seq_len_q=seq_q,
-        seq_len_kv=seq_kv,
+        max_seqlen_q=seq_q,
+        max_seqlen_kv=seq_kv,
         dim=dim,
         is_causal=False,
         dtype=torch.float32,
@@ -45,6 +45,8 @@ def test_gqa_prefill_fwd_float32_runtime_compare():
         batch, seq_kv, heads_kv, dim
     )
 
-    actual, _ = tileops_kernel(q, k, v)
+    cu_seqlens_q = torch.tensor([0, seq_q], dtype=torch.int32)
+    cu_seqlens_kv = torch.tensor([0, seq_kv], dtype=torch.int32)
+    actual = tileops_kernel(q, k, v, cu_seqlens_q, cu_seqlens_kv)
     expected = _reference(q, k, v, heads_kv)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)

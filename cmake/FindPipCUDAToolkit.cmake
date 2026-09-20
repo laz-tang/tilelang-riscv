@@ -14,6 +14,16 @@
 #   3. Otherwise, try auto-detecting from the current Python environment's
 #      site-packages (works with --no-build-isolation).
 
+# This module is included before project(), so no C or C++ language is enabled
+# yet.  FindCUDAToolkit may pull in FindThreads on recent CMake versions, which
+# is invalid at that point.  A CPU-only/RISC-V build has no reason to probe the
+# CUDA toolkit in the first place, so honor an explicit disable before doing
+# any package discovery.
+if((DEFINED USE_CUDA AND NOT USE_CUDA) OR
+   (DEFINED ENV{USE_CUDA} AND NOT "$ENV{USE_CUDA}"))
+  return()
+endif()
+
 # --- Try host CUDA first ---
 find_package(CUDAToolkit QUIET)
 if(CUDAToolkit_FOUND)

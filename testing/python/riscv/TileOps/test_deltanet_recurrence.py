@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import importlib
 import pytest
 import torch
 
-from ._harness import get_kernel_class
+from ._harness import compile_tileops_jit, get_kernel_class
 
 
 def _reference(
@@ -64,3 +65,20 @@ def test_deltanet_decode_float32_runtime_compare(class_name: str):
     expected = _reference(q, k, v, beta, state)
     for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
         torch.testing.assert_close(actual_tensor, expected_tensor, rtol=1e-5, atol=1e-5)
+
+
+def test_deltanet_raw_decode_bfloat16_runtime_compare():
+    get_kernel_class("deltanet_recurrence", "DeltaNetDecodeRawCudaFlaStyleKernel")
+    module = importlib.import_module("tileops.kernels.linear_attention.deltanet_recurrence")
+    jit_kernel = module._deltanet_decode_raw_cuda_flastyle_tl(1, 1, 128, 128)
+    kernel = compile_tileops_jit(jit_kernel, {"threads": 32})
+    q = torch.linspace(-0.1, 0.1, 128, dtype=torch.bfloat16).reshape(1, 1, 128)
+    k = torch.linspace(-0.2, 0.2, 128, dtype=torch.bfloat16).reshape(1, 1, 128)
+    v = torch.linspace(-0.3, 0.3, 128, dtype=torch.bfloat16).reshape(1, 1, 128)
+    beta = torch.full((1, 1), 0.5, dtype=torch.bfloat16)
+    state = torch.zeros((1, 1, 128, 128), dtype=torch.bfloat16)
+
+    actual = kernel(q, k, v, beta, state)
+    expected = _reference(q, k, v, beta, state)
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_tensor.float(), expected_tensor, rtol=2e-2, atol=2e-2)

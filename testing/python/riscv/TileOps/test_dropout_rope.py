@@ -103,6 +103,7 @@ def test_rope_neox_position_ids_float32_runtime_compare():
     cos = torch.cos(angles)
     sin = torch.sin(angles)
     position_ids = torch.tensor([0, 3, 1, 6], dtype=torch.int32)
+    status = torch.zeros(1, dtype=torch.int32)
 
     rope_cls = get_kernel_class("rope", "RopeNeoxPositionIdsKernel")
     tileops_kernel = rope_cls(
@@ -117,10 +118,12 @@ def test_rope_neox_position_ids_float32_runtime_compare():
     kernel = compile_tileops_kernel(tileops_kernel)
     actual = kernel(
         x.contiguous().reshape(-1),
-        cos.contiguous(),
-        sin.contiguous(),
-        position_ids.contiguous(),
-    ).reshape(x.shape)
+            cos.contiguous(),
+            sin.contiguous(),
+            position_ids.contiguous(),
+            status,
+        ).reshape(x.shape)
+    assert status.item() == 0
 
     expected = x.clone()
     half = rotary_dim // 2

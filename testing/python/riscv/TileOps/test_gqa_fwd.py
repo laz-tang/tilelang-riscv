@@ -29,15 +29,17 @@ def _gqa_reference(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, heads_kv: 
 
 def test_mha_fwd_float32_runtime_compare():
     batch, heads, seq_len, dim = 1, 2, 8, 16
-    kernel_cls = get_kernel_class("attention.gqa_fwd", "MHAFwdKernel")
+    kernel_cls = get_kernel_class("attention.gqa_fwd", "GQAPrefillFwdKernel")
     tileops_kernel = kernel_cls(
         batch=batch,
         heads=heads,
-        seq_len=seq_len,
+        heads_kv=heads,
+        max_seqlen_q=seq_len,
+        max_seqlen_kv=seq_len,
         dim=dim,
         is_causal=False,
         dtype=torch.float32,
-        config={"block_m": 4, "block_n": 4, "num_stages": 1, "threads": 128},
+        config={"block_m": 8, "block_n": 8, "num_stages": 1, "threads": 128},
     )
 
     q = torch.linspace(-0.5, 0.5, batch * seq_len * heads * dim, dtype=torch.float32).reshape(
@@ -50,23 +52,25 @@ def test_mha_fwd_float32_runtime_compare():
         batch, seq_len, heads, dim
     )
 
-    actual, _ = tileops_kernel(q, k, v)
+    cu_seqlens = torch.tensor([0, seq_len], dtype=torch.int32)
+    actual = tileops_kernel(q, k, v, cu_seqlens, cu_seqlens)
     expected = _mha_reference(q, k, v)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
 def test_gqa_fwd_float32_runtime_compare():
     batch, heads, heads_kv, seq_len, dim = 1, 4, 2, 8, 16
-    kernel_cls = get_kernel_class("attention.gqa_fwd", "GQAFwdKernel")
+    kernel_cls = get_kernel_class("attention.gqa_fwd", "GQAPrefillFwdKernel")
     tileops_kernel = kernel_cls(
         batch=batch,
         heads=heads,
         heads_kv=heads_kv,
-        seq_len=seq_len,
+        max_seqlen_q=seq_len,
+        max_seqlen_kv=seq_len,
         dim=dim,
         is_causal=False,
         dtype=torch.float32,
-        config={"block_m": 4, "block_n": 4, "num_stages": 1, "threads": 128},
+        config={"block_m": 8, "block_n": 8, "num_stages": 1, "threads": 128},
     )
 
     q = torch.linspace(-0.5, 0.5, batch * seq_len * heads * dim, dtype=torch.float32).reshape(
@@ -79,6 +83,7 @@ def test_gqa_fwd_float32_runtime_compare():
         batch, seq_len, heads_kv, dim
     )
 
-    actual, _ = tileops_kernel(q, k, v)
+    cu_seqlens = torch.tensor([0, seq_len], dtype=torch.int32)
+    actual = tileops_kernel(q, k, v, cu_seqlens, cu_seqlens)
     expected = _gqa_reference(q, k, v, heads_kv)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)

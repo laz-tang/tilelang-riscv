@@ -13,7 +13,7 @@ def test_moe_unpermute_float32_runtime_compare():
         num_tokens=num_tokens,
         top_k=top_k,
         hidden_size=hidden_size,
-        padded_batch_sum=padded_batch_sum,
+        materialized_rows=padded_batch_sum,
         dtype=torch.float32,
     )
 

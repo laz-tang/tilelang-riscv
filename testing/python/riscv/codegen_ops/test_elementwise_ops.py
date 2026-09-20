@@ -127,6 +127,8 @@ def advanced_math_intrinsics(
     H: T.Buffer((4,), "float32"),
     I: T.Buffer((4,), "float32"),
     J: T.Buffer((4,), "float32"),
+    K: T.Buffer((4,), "float32"),
+    L: T.Buffer((4,), "float32"),
 ):
     for i in T.serial(4):
         with T.block("tanh"):
@@ -164,6 +166,14 @@ def advanced_math_intrinsics(
         with T.block("pow"):
             vi = T.axis.spatial(4, i)
             J[vi] = T.pow(A[vi], B[vi])
+    for i in T.serial(4):
+        with T.block("round"):
+            vi = T.axis.spatial(4, i)
+            K[vi] = T.round(A[vi])
+    for i in T.serial(4):
+        with T.block("fmod"):
+            vi = T.axis.spatial(4, i)
+            L[vi] = T.fmod(A[vi], B[vi])
 """,
         expected=(
             "func.func @advanced_math_intrinsics",
@@ -176,6 +186,7 @@ def advanced_math_intrinsics(
             "math.trunc",
             "math.roundeven",
             "math.powf",
+            "arith.remf",
         ),
     ),
     SourceCase(

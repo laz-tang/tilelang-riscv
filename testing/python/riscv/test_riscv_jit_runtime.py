@@ -57,6 +57,108 @@ def test_tilelang_compile_runs_riscv_host_adapter():
 
 
 @T.prim_func
+def tile_thread_invariant_shared_sync_phases(
+    A: T.Tensor((4,), "float32"),
+    B: T.Tensor((4,), "float32"),
+):
+    with T.Kernel(1, threads=4):
+        scratch = T.alloc_shared((4,), "float32")
+        for i in T.Parallel(4):
+            scratch[i] = A[i]
+        T.sync_threads()
+        for i in T.Parallel(4):
+            scratch[i] = scratch[i] * T.float32(2)
+        T.sync_threads()
+        for i in T.Parallel(4):
+            B[i] = scratch[i]
+
+
+def test_tilelang_compile_runs_thread_invariant_shared_sync_phases_once():
+    kernel = tilelang.compile(
+        tile_thread_invariant_shared_sync_phases,
+        out_idx=[1],
+        target="riscv",
+    )
+
+    data = torch.arange(1, 5, dtype=torch.float32)
+    out = kernel(data)
+    source = kernel.get_kernel_source()
+    kernel.close()
+
+    assert source.count("scf.parallel") == 3
+    assert source.count("scf.for") == 6
+    torch.testing.assert_close(out, data * 2)
+
+
+@T.prim_func
+def tile_three_dimensional_block_grid(
+    A: T.Tensor((8,), "int32"),
+    B: T.Tensor((8,), "int32"),
+):
+    with T.Kernel(2, 2, 2, threads=1) as (bx, by, bz):
+        index = (bz * 2 + by) * 2 + bx
+        B[index] = A[index] + index
+
+
+def test_tilelang_compile_runs_three_dimensional_block_grid():
+    kernel = tilelang.compile(tile_three_dimensional_block_grid, out_idx=[1], target="riscv")
+
+    data = torch.arange(8, dtype=torch.int32)
+    out = kernel(data)
+    kernel.close()
+
+    torch.testing.assert_close(out, data * 2)
+
+
+@T.prim_func
+def tile_shfl_xor_local_var(
+    A: T.Tensor((4,), "float32"),
+    B: T.Tensor((4,), "float32"),
+):
+    with T.Kernel(1, threads=4):
+        tid = T.get_thread_binding()
+        value = T.alloc_var("float32")
+        value = T.float32(-1)
+        if tid < 2:
+            value = A[tid]
+        B[tid] = T.shfl_xor(value, 1)
+
+
+def test_tilelang_compile_replays_shfl_xor_local_var_source_lane():
+    kernel = tilelang.compile(tile_shfl_xor_local_var, out_idx=[1], target="riscv")
+
+    data = torch.arange(4, dtype=torch.float32)
+    out = kernel(data)
+    kernel.close()
+
+    torch.testing.assert_close(out, torch.tensor([1.0, 0.0, -1.0, -1.0]))
+
+
+@T.prim_func
+def tile_nested_shfl_xor_local_var(
+    A: T.Tensor((4,), "float32"),
+    B: T.Tensor((4,), "float32"),
+):
+    with T.Kernel(1, threads=4):
+        tid = T.get_thread_binding()
+        value = T.alloc_var("float32")
+        value = A[tid]
+        value = T.max(value, T.shfl_xor(value, 1))
+        value = T.max(value, T.shfl_xor(value, 2))
+        B[tid] = value
+
+
+def test_tilelang_compile_replays_nested_shfl_xor_local_var():
+    kernel = tilelang.compile(tile_nested_shfl_xor_local_var, out_idx=[1], target="riscv")
+
+    data = torch.arange(4, dtype=torch.float32)
+    out = kernel(data)
+    kernel.close()
+
+    torch.testing.assert_close(out, torch.full((4,), 3.0))
+
+
+@T.prim_func
 def tile_dynamic_copy(
     A: T.Tensor((N_DYNAMIC,), "float32"),
     B: T.Tensor((N_DYNAMIC,), "float32"),
@@ -429,6 +531,7 @@ def test_tilelang_compile_runs_riscv_host_adapter_with_grouped_gemm():
     assert "func.func @tile_grouped_gemm_portable" in source
     assert source.count("linalg.matmul") == len(GROUP_SIZES_GROUPED_GEMM)
     assert "memref.subview" in source
+    assert "memref.reinterpret_cast %subview" not in source
     torch.testing.assert_close(out, ref)
 
 
@@ -489,6 +592,7 @@ def test_tilelang_compile_runs_riscv_host_adapter_with_dynamic_grouped_gemm():
     assert source.count("linalg.matmul") == 1
     assert "memref<?x4x5xf32>" in source
     assert "memref<?xi32>" in source
+    assert "memref.reinterpret_cast %subview" not in source
     torch.testing.assert_close(out, ref)
 
 

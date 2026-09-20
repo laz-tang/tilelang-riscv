@@ -1,8 +1,79 @@
 from __future__ import annotations
 
+import importlib
+
 import torch
 
 from ._harness import compile_tileops_kernel, get_norm_kernel_class
+
+
+def _compile_norm(tileops_kernel, rows: int = 2):
+    """Materialize norm factories whose row count is now chosen at call time."""
+    name = type(tileops_kernel).__name__
+    if name == "BatchNormFwdTrainKernel" and tileops_kernel.path == "whole":
+        # The current TileOps wrapper dispatches short, strided channels to a
+        # separate register-held kernel rather than its generic reduction.
+        tileops_kernel.kernel = tileops_kernel.whole_kernel
+        tileops_kernel.config = {"threads": tileops_kernel.launch}
+    if not hasattr(tileops_kernel, "kernel"):
+        if name == "LayerNormKernel":
+            module = importlib.import_module("tileops.kernels.norm.layer_norm")
+            tileops_kernel.kernel = module._layer_norm_kernel(
+                rows,
+                tileops_kernel.N,
+                tileops_kernel.eps,
+                tileops_kernel.dtype_str,
+                tileops_kernel.PARTIAL_MIN_ELEMENTS_PER_THREAD,
+                1,
+            )
+        elif name == "RMSNormKernel":
+            module = importlib.import_module("tileops.kernels.norm.rms_norm")
+            tileops_kernel.kernel = module._rms_norm_kernel(
+                rows,
+                tileops_kernel.N,
+                tileops_kernel.eps,
+                tileops_kernel.dtype_str,
+                tileops_kernel.PARTIAL_MIN_ELEMENTS_PER_THREAD,
+                1,
+            )
+        elif name == "FusedAddLayerNormKernel":
+            module = importlib.import_module("tileops.kernels.norm.fused_add_norm")
+            tileops_kernel.kernel = module._fused_add_layer_norm_kernel(
+                rows, tileops_kernel.N, tileops_kernel.eps, tileops_kernel.dtype_str
+            )
+        elif name == "FusedAddRMSNormKernel":
+            module = importlib.import_module("tileops.kernels.norm.fused_add_norm")
+            tileops_kernel.kernel = module._fused_add_rms_norm_kernel(
+                rows, tileops_kernel.N, tileops_kernel.eps, tileops_kernel.dtype_str, 1
+            )
+        elif name == "AdaLayerNormKernel":
+            module = importlib.import_module("tileops.kernels.norm.ada_layer_norm")
+            tileops_kernel.kernel = module._ada_layer_norm_kernel(
+                rows,
+                tileops_kernel.N,
+                tileops_kernel.eps,
+                tileops_kernel.dtype_str,
+                has_gate=tileops_kernel.has_gate,
+                use_cp_async=tileops_kernel.use_cp_async,
+            )
+        elif name in ("GroupNormKernel", "InstanceNormKernel"):
+            module = importlib.import_module("tileops.kernels.norm.group_norm")
+            tileops_kernel.kernel = module._group_norm_kernel(
+                rows,
+                tileops_kernel.D,
+                tileops_kernel.eps,
+                tileops_kernel.dtype_str,
+                tileops_kernel.num_groups,
+                tileops_kernel.channels_per_group,
+            )
+        elif name in ("GroupNormNoAffineKernel", "InstanceNormNoAffineKernel"):
+            module = importlib.import_module("tileops.kernels.norm.group_norm")
+            tileops_kernel.kernel = module._group_norm_no_affine_kernel(
+                rows, tileops_kernel.D, tileops_kernel.eps, tileops_kernel.dtype_str
+            )
+        else:
+            raise TypeError(f"Unsupported dynamic norm kernel {name}")
+    return compile_tileops_kernel(tileops_kernel)
 
 
 def _row_norm_reference(
@@ -35,13 +106,12 @@ def test_layer_norm_float32_runtime_compare():
     weight = torch.linspace(0.5, 1.5, 256, dtype=torch.float32)
     bias = torch.linspace(-0.25, 0.25, 256, dtype=torch.float32)
     tileops_kernel = get_norm_kernel_class("layer_norm", "LayerNormKernel")(
-        M=2,
         N=256,
         eps=1e-5,
         dtype=x.dtype,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     expected = torch.nn.functional.layer_norm(x, (256,), weight, bias, eps=1e-5)
     _assert_close(kernel(x.contiguous(), weight.contiguous(), bias.contiguous()), expected)
 
@@ -50,13 +120,12 @@ def test_rms_norm_float32_runtime_compare():
     x = torch.linspace(-2.0, 2.0, 512, dtype=torch.float32).reshape(2, 256)
     weight = torch.linspace(0.5, 1.5, 256, dtype=torch.float32)
     tileops_kernel = get_norm_kernel_class("rms_norm", "RMSNormKernel")(
-        M=2,
         N=256,
         eps=1e-5,
         dtype=x.dtype,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     expected = _rms_norm_reference(x, weight, eps=1e-5)
     _assert_close(kernel(x.contiguous(), weight.contiguous()), expected)
 
@@ -66,13 +135,14 @@ def test_group_norm_float32_runtime_compare():
     weight = torch.linspace(0.5, 1.5, 256, dtype=torch.float32)
     bias = torch.linspace(-0.25, 0.25, 256, dtype=torch.float32)
     tileops_kernel = get_norm_kernel_class("group_norm", "GroupNormKernel")(
-        M=2,
         D=256,
         eps=1e-5,
         dtype=x.dtype,
+        num_groups=1,
+        channels_per_group=256,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     expected = _row_norm_reference(x, eps=1e-5, weight=weight, bias=bias)
     _assert_close(kernel(x.contiguous(), weight.contiguous(), bias.contiguous()), expected)
 
@@ -80,13 +150,12 @@ def test_group_norm_float32_runtime_compare():
 def test_group_norm_no_affine_float32_runtime_compare():
     x = torch.linspace(-2.0, 2.0, 512, dtype=torch.float32).reshape(2, 256)
     tileops_kernel = get_norm_kernel_class("group_norm", "GroupNormNoAffineKernel")(
-        M=2,
         D=256,
         eps=1e-5,
         dtype=x.dtype,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     expected = _row_norm_reference(x, eps=1e-5)
     _assert_close(kernel(x.contiguous()), expected)
 
@@ -97,13 +166,12 @@ def test_fused_add_layer_norm_float32_runtime_compare():
     weight = torch.linspace(0.5, 1.5, 256, dtype=torch.float32)
     bias = torch.linspace(-0.25, 0.25, 256, dtype=torch.float32)
     tileops_kernel = get_norm_kernel_class("fused_add_norm", "FusedAddLayerNormKernel")(
-        M=2,
         N=256,
         eps=1e-5,
         dtype=x.dtype,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     summed = x + residual
     expected = torch.nn.functional.layer_norm(summed, (256,), weight, bias, eps=1e-5)
     actual, residual_out = kernel(
@@ -121,13 +189,12 @@ def test_fused_add_rms_norm_float32_runtime_compare():
     residual = torch.linspace(1.0, -1.0, 512, dtype=torch.float32).reshape(2, 256)
     weight = torch.linspace(0.5, 1.5, 256, dtype=torch.float32)
     tileops_kernel = get_norm_kernel_class("fused_add_norm", "FusedAddRMSNormKernel")(
-        M=2,
         N=256,
         eps=1e-5,
         dtype=x.dtype,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     summed = x + residual
     expected = _rms_norm_reference(summed, weight, eps=1e-5)
     actual, residual_out = kernel(x.contiguous(), residual.contiguous(), weight.contiguous())
@@ -141,14 +208,13 @@ def test_ada_layer_norm_float32_runtime_compare():
     shift = torch.linspace(-0.25, 0.25, 512, dtype=torch.float32).reshape(2, 256)
     dummy = torch.empty(1, dtype=x.dtype)
     tileops_kernel = get_norm_kernel_class("ada_layer_norm", "AdaLayerNormKernel")(
-        M=2,
         N=256,
         eps=1e-5,
         dtype=x.dtype,
         has_gate=False,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     expected = _row_norm_reference(x, eps=1e-5, weight=scale, bias=shift)
     _assert_close(kernel(x.contiguous(), scale.contiguous(), shift.contiguous(), dummy), expected)
 
@@ -160,14 +226,13 @@ def test_ada_layer_norm_zero_float32_runtime_compare():
     gate = torch.linspace(0.25, 0.75, 512, dtype=torch.float32).reshape(2, 256)
     dummy = torch.empty(1, dtype=x.dtype)
     tileops_kernel = get_norm_kernel_class("ada_layer_norm", "AdaLayerNormKernel")(
-        M=2,
         N=256,
         eps=1e-5,
         dtype=x.dtype,
         has_gate=True,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     normalized = _row_norm_reference(x, eps=1e-5, weight=scale, bias=shift)
     expected = gate * normalized
     _assert_close(
@@ -187,13 +252,14 @@ def test_instance_norm_float32_runtime_compare():
     weight = torch.linspace(0.5, 1.5, 256, dtype=torch.float32)
     bias = torch.linspace(-0.25, 0.25, 256, dtype=torch.float32)
     tileops_kernel = get_norm_kernel_class("instance_norm", "InstanceNormKernel")(
-        M=2,
         D=256,
         eps=1e-5,
         dtype=x.dtype,
+        num_groups=1,
+        channels_per_group=256,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     expected = _row_norm_reference(x, eps=1e-5, weight=weight, bias=bias)
     _assert_close(kernel(x.contiguous(), weight.contiguous(), bias.contiguous()), expected)
 
@@ -204,13 +270,12 @@ def test_instance_norm_no_affine_float32_runtime_compare():
         "instance_norm",
         "InstanceNormNoAffineKernel",
     )(
-        M=2,
         D=256,
         eps=1e-5,
         dtype=x.dtype,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     expected = _row_norm_reference(x, eps=1e-5)
     _assert_close(kernel(x.contiguous()), expected)
 
@@ -230,13 +295,13 @@ def test_batch_norm_infer_float32_runtime_compare():
         config={"block_l": 16, "num_stages": 0, "threads": 16},
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     scale = weight[:, None] / torch.sqrt(running_var[:, None] + 1e-5)
     shift = bias[:, None] - running_mean[:, None] * scale
     expected = x * scale + shift
     _assert_close(
         kernel(
-            x.contiguous(),
+            x.contiguous().reshape(-1),
             weight.contiguous(),
             bias.contiguous(),
             running_mean.contiguous(),
@@ -247,8 +312,8 @@ def test_batch_norm_infer_float32_runtime_compare():
 
 
 def test_batch_norm_train_float32_runtime_compare():
-    c, l = 4, 16
-    x = torch.linspace(-2.0, 2.0, c * l, dtype=torch.float32).reshape(c, l)
+    c, l = 4, 32
+    x = torch.linspace(-2.0, 2.0, c * l, dtype=torch.float32).reshape(l, c)
     weight = torch.linspace(0.5, 1.5, c, dtype=torch.float32)
     bias = torch.linspace(-0.25, 0.25, c, dtype=torch.float32)
     running_mean = torch.linspace(-0.1, 0.1, c, dtype=torch.float32)
@@ -263,16 +328,17 @@ def test_batch_norm_train_float32_runtime_compare():
         dtype=x.dtype,
         eps=1e-5,
         momentum=0.1,
-        config={"block_l": 16, "threads": 16},
+        config={"block_l": 32, "threads": 32},
+        S=1,
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
-    mean = x.mean(dim=1)
-    var = ((x - mean[:, None]) * (x - mean[:, None])).mean(dim=1)
+    kernel = _compile_norm(tileops_kernel)
+    mean = x.mean(dim=0)
+    var = ((x - mean[None, :]) * (x - mean[None, :])).mean(dim=0)
     rstd = torch.rsqrt(var + 1e-5)
-    expected = weight[:, None] * (x - mean[:, None]) * rstd[:, None] + bias[:, None]
+    expected = weight[None, :] * (x - mean[None, :]) * rstd[None, :] + bias[None, :]
     actual = kernel(
-        x.contiguous(),
+        x.contiguous().reshape(-1),
         weight.contiguous(),
         bias.contiguous(),
         running_mean,
@@ -298,7 +364,7 @@ def test_batch_norm_train_float32_runtime_compare():
 
 
 def test_batch_norm_backward_float32_runtime_compare():
-    c, l = 4, 16
+    c, l = 4, 32
     grad_out = torch.linspace(-1.0, 1.0, c * l, dtype=torch.float32).reshape(c, l)
     x = torch.linspace(-2.0, 2.0, c * l, dtype=torch.float32).reshape(c, l)
     weight = torch.linspace(0.5, 1.5, c, dtype=torch.float32)
@@ -311,10 +377,10 @@ def test_batch_norm_backward_float32_runtime_compare():
         C=c,
         L=l,
         dtype=x.dtype,
-        config={"block_l": 16, "threads": 16},
+        config={"block_l": 32, "threads": 32},
     )
 
-    kernel = compile_tileops_kernel(tileops_kernel)
+    kernel = _compile_norm(tileops_kernel)
     actual_grad_x = kernel(
         grad_out.contiguous(),
         x.contiguous(),

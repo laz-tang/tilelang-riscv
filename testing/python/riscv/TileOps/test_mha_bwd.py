@@ -49,9 +49,10 @@ def test_mha_bwd_float32_runtime_compare():
 
     exp_dq, exp_dk, exp_dv, lse, delta = _reference_attention_bwd(q, k, v, do, is_causal)
 
-    kernel_cls = get_kernel_class("attention.gqa_bwd", "MHABwdKernel")
+    kernel_cls = get_kernel_class("attention.gqa_bwd", "GQABwdWgmmaPipelinedKernel")
     tileops_kernel = kernel_cls(
         batch,
+        heads,
         heads,
         seq_len,
         dim,
@@ -62,7 +63,9 @@ def test_mha_bwd_float32_runtime_compare():
     kernel = compile_tileops_kernel(tileops_kernel)
 
     dq = torch.zeros_like(q)
-    dk, dv = kernel(
+    dk = torch.zeros_like(k)
+    dv = torch.zeros_like(v)
+    kernel(
         q.contiguous(),
         k.contiguous(),
         v.contiguous(),
@@ -70,6 +73,8 @@ def test_mha_bwd_float32_runtime_compare():
         lse.contiguous(),
         delta.contiguous(),
         dq,
+        dk,
+        dv,
     )
 
     torch.testing.assert_close(dq, exp_dq, rtol=1e-4, atol=1e-4)

@@ -34,6 +34,7 @@ def test_reduce_float32_runtime_compare(op_kind, reference):
         N=n,
         op_kind=op_kind,
         dtype=x.dtype,
+        reduce_axes=(1,),
         correction=1,
         config={"block_m": 1, "threads": 128},
     )
@@ -50,6 +51,7 @@ def test_reduce_var_mean_float32_runtime_compare():
         N=n,
         op_kind="var_mean",
         dtype=x.dtype,
+        reduce_axes=(1,),
         correction=1,
         config={"block_m": 1, "threads": 128},
     )
@@ -76,6 +78,7 @@ def test_softmax_float32_runtime_compare(op_kind, reference):
         N=n,
         op_kind=op_kind,
         dtype=x.dtype,
+        norm_axis=1,
         config={"block_m": 1, "threads": 128},
     )
     kernel = compile_tileops_kernel(tileops_kernel)
@@ -98,6 +101,7 @@ def test_softmax_tiled_float32_runtime_compare(op_kind, reference):
         N=n,
         op_kind=op_kind,
         dtype=x.dtype,
+        norm_axis=1,
         config={"block_m": 1, "threads": 128, "tile_n": 256},
     )
     kernel = compile_tileops_kernel(tileops_kernel)
@@ -121,6 +125,7 @@ def test_vector_norm_float32_runtime_compare(op_kind, reference):
         N=n,
         op_kind=op_kind,
         dtype=x.dtype,
+        reduce_axes=(1,),
         config={"block_m": 1, "threads": 128},
     )
     kernel = compile_tileops_kernel(tileops_kernel)
@@ -141,6 +146,7 @@ def test_logical_reduce_float32_runtime_compare(op_kind):
         N=n,
         op_kind=op_kind,
         dtype=x.dtype,
+        reduce_axes=(1,),
         config={"block_m": 1, "threads": 128},
     )
     kernel = compile_tileops_kernel(tileops_kernel)
@@ -172,6 +178,7 @@ def test_argreduce_float32_runtime_compare(op_kind, reference):
         N=n,
         op_kind=op_kind,
         dtype=x.dtype,
+        reduce_axes=(1,),
         config={"block_m": 1, "threads": 128},
     )
     kernel = compile_tileops_kernel(tileops_kernel)
@@ -187,6 +194,7 @@ def test_logsumexp_float32_runtime_compare():
         N=n,
         op_kind="logsumexp",
         dtype=x.dtype,
+        reduce_axes=(1,),
         config={"block_m": 1, "threads": 128},
     )
     kernel = compile_tileops_kernel(tileops_kernel)
@@ -202,6 +210,7 @@ def test_logsumexp_tiled_float32_runtime_compare():
         N=n,
         op_kind="logsumexp",
         dtype=x.dtype,
+        reduce_axes=(1,),
         config={"block_m": 1, "threads": 128, "tile_n": 256},
     )
     kernel = compile_tileops_kernel(tileops_kernel)
@@ -227,6 +236,7 @@ def test_cumulative_float32_runtime_compare(op_kind, reference):
         N=n,
         op_kind=op_kind,
         dtype=x.dtype,
+        scan_axis=1,
         config={"block_m": 1, "block_n": 256, "threads": 128},
     )
     kernel = compile_tileops_kernel(tileops_kernel)

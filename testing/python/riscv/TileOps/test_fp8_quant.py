@@ -16,10 +16,12 @@ def test_fp8_quant_float32_runtime_compare():
         seq_len_kv=seq_len_kv,
         kv_group=kv_group,
         index_dim=index_dim,
-        in_dtype=torch.float32,
-        config={"num_stages": 0, "block_m": 4},
+        dtype=torch.float32,
+        config={"block_m": 4},
     )
-    scale, actual = compile_tileops_kernel(tileops_kernel)(x.contiguous())
+    scale, actual = compile_tileops_kernel(tileops_kernel)(x.reshape(-1, index_dim).contiguous())
+    scale = scale.reshape(batch, seq_len_kv, kv_group)
+    actual = actual.reshape(batch, seq_len_kv, kv_group, index_dim)
 
     expected_scale = torch.maximum(x.abs().amax(dim=-1), torch.full((batch, seq_len_kv, kv_group), 1e-4))
     expected_scale = expected_scale / 448.0

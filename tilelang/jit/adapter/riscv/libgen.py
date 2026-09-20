@@ -32,6 +32,15 @@ _F4_TRUNCF_RE = re.compile(
     r"^(?P<indent>\s*)(?P<result>%[\w\d_.$-]+)\s*=\s*arith\.truncf\s+"
     r"(?P<value>%[\w\d_.$-]+)\s*:\s*f32\s+to\s+f4E2M1FN\s*$"
 )
+_MATH_COPYSIGN_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<result>%[\w\d_.$-]+)\s*=\s*math\.copysign\s+"
+    r"(?P<magnitude>%[\w\d_.$-]+)\s*,\s*(?P<sign>%[\w\d_.$-]+)\s*:\s*"
+    r"(?P<dtype>f32|f64)\s*$"
+)
+_MATH_CTPOP_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<result>%[\w\d_.$-]+)\s*=\s*math\.ctpop\s+"
+    r"(?P<value>%[\w\d_.$-]+)\s*:\s*(?P<dtype>i8|i16|i32|i64)\s*$"
+)
 
 
 def _f8_helper_suffix(dtype: str) -> str:
@@ -120,6 +129,112 @@ def _legalize_low_precision_conversions_for_riscv(mlir_source: str) -> str:
     return ("\n".join(output) + ("\n" if mlir_source.endswith("\n") else "")).replace("f4E2M1FN", "i8")
 
 
+def _legalize_unsupported_math_ops_for_riscv(mlir_source: str) -> str:
+    """Expand scalar math ops not covered by this MLIR toolchain's conversions."""
+
+    rewritten: list[str] = []
+    for line in mlir_source.splitlines():
+        copysign_match = _MATH_COPYSIGN_RE.match(line)
+        if copysign_match:
+            indent = copysign_match.group("indent")
+            result = copysign_match.group("result")
+            magnitude = copysign_match.group("magnitude")
+            sign = copysign_match.group("sign")
+            dtype = copysign_match.group("dtype")
+            integer_dtype = "i32" if dtype == "f32" else "i64"
+            abs_mask = 2 ** (int(integer_dtype[1:]) - 1) - 1
+            sign_mask = -(2 ** (int(integer_dtype[1:]) - 1))
+            magnitude_bits = _ssa_suffix(result, "copysign_magnitude_bits")
+            sign_bits = _ssa_suffix(result, "copysign_sign_bits")
+            abs_mask_value = _ssa_suffix(result, "copysign_abs_mask")
+            sign_mask_value = _ssa_suffix(result, "copysign_sign_mask")
+            absolute_bits = _ssa_suffix(result, "copysign_absolute_bits")
+            signed_bits = _ssa_suffix(result, "copysign_signed_bits")
+            combined_bits = _ssa_suffix(result, "copysign_combined_bits")
+            rewritten.extend(
+                [
+                    f"{indent}{magnitude_bits} = arith.bitcast {magnitude} : {dtype} to {integer_dtype}",
+                    f"{indent}{sign_bits} = arith.bitcast {sign} : {dtype} to {integer_dtype}",
+                    f"{indent}{abs_mask_value} = arith.constant {abs_mask} : {integer_dtype}",
+                    f"{indent}{sign_mask_value} = arith.constant {sign_mask} : {integer_dtype}",
+                    f"{indent}{absolute_bits} = arith.andi {magnitude_bits}, {abs_mask_value} : {integer_dtype}",
+                    f"{indent}{signed_bits} = arith.andi {sign_bits}, {sign_mask_value} : {integer_dtype}",
+                    f"{indent}{combined_bits} = arith.ori {absolute_bits}, {signed_bits} : {integer_dtype}",
+                    f"{indent}{result} = arith.bitcast {combined_bits} : {integer_dtype} to {dtype}",
+                ]
+            )
+            continue
+
+        ctpop_match = _MATH_CTPOP_RE.match(line)
+        if ctpop_match:
+            indent = ctpop_match.group("indent")
+            result = ctpop_match.group("result")
+            value = ctpop_match.group("value")
+            dtype = ctpop_match.group("dtype")
+            width = int(dtype[1:])
+            masks = {
+                "pair": int("55" * (width // 8), 16),
+                "quad": int("33" * (width // 8), 16),
+                "nibble": int("0f" * (width // 8), 16),
+            }
+            pair_mask = _ssa_suffix(result, "ctpop_pair_mask")
+            pair_shift_amount = _ssa_suffix(result, "ctpop_pair_shift_amount")
+            pair_shift = _ssa_suffix(result, "ctpop_pair_shift")
+            pair_bits = _ssa_suffix(result, "ctpop_pair_bits")
+            pair_sum = _ssa_suffix(result, "ctpop_pair_sum")
+            quad_mask = _ssa_suffix(result, "ctpop_quad_mask")
+            quad_low = _ssa_suffix(result, "ctpop_quad_low")
+            quad_shift_amount = _ssa_suffix(result, "ctpop_quad_shift_amount")
+            quad_shift = _ssa_suffix(result, "ctpop_quad_shift")
+            quad_high = _ssa_suffix(result, "ctpop_quad_high")
+            quad_sum = _ssa_suffix(result, "ctpop_quad_sum")
+            nibble_shift_amount = _ssa_suffix(result, "ctpop_nibble_shift_amount")
+            nibble_shift = _ssa_suffix(result, "ctpop_nibble_shift")
+            nibble_sum = _ssa_suffix(result, "ctpop_nibble_sum")
+            nibble_mask = _ssa_suffix(result, "ctpop_nibble_mask")
+            current = _ssa_suffix(result, "ctpop_nibbles")
+            rewritten.extend(
+                [
+                    f"{indent}{pair_mask} = arith.constant {masks['pair']} : {dtype}",
+                    f"{indent}{pair_shift_amount} = arith.constant 1 : {dtype}",
+                    f"{indent}{pair_shift} = arith.shrui {value}, {pair_shift_amount} : {dtype}",
+                    f"{indent}{pair_bits} = arith.andi {pair_shift}, {pair_mask} : {dtype}",
+                    f"{indent}{pair_sum} = arith.subi {value}, {pair_bits} : {dtype}",
+                    f"{indent}{quad_mask} = arith.constant {masks['quad']} : {dtype}",
+                    f"{indent}{quad_low} = arith.andi {pair_sum}, {quad_mask} : {dtype}",
+                    f"{indent}{quad_shift_amount} = arith.constant 2 : {dtype}",
+                    f"{indent}{quad_shift} = arith.shrui {pair_sum}, {quad_shift_amount} : {dtype}",
+                    f"{indent}{quad_high} = arith.andi {quad_shift}, {quad_mask} : {dtype}",
+                    f"{indent}{quad_sum} = arith.addi {quad_low}, {quad_high} : {dtype}",
+                    f"{indent}{nibble_shift_amount} = arith.constant 4 : {dtype}",
+                    f"{indent}{nibble_shift} = arith.shrui {quad_sum}, {nibble_shift_amount} : {dtype}",
+                    f"{indent}{nibble_sum} = arith.addi {quad_sum}, {nibble_shift} : {dtype}",
+                    f"{indent}{nibble_mask} = arith.constant {masks['nibble']} : {dtype}",
+                    f"{indent}{current} = arith.andi {nibble_sum}, {nibble_mask} : {dtype}",
+                ]
+            )
+            for shift in (8, 16, 32):
+                if shift >= width:
+                    continue
+                shift_amount = _ssa_suffix(result, f"ctpop_shift_amount_{shift}")
+                shifted = _ssa_suffix(result, f"ctpop_shift_{shift}")
+                summed = _ssa_suffix(result, f"ctpop_sum_{shift}")
+                rewritten.append(f"{indent}{shift_amount} = arith.constant {shift} : {dtype}")
+                rewritten.append(
+                    f"{indent}{shifted} = arith.shrui {current}, {shift_amount} : {dtype}"
+                )
+                rewritten.append(f"{indent}{summed} = arith.addi {current}, {shifted} : {dtype}")
+                current = summed
+            final_mask = _ssa_suffix(result, "ctpop_final_mask")
+            rewritten.append(f"{indent}{final_mask} = arith.constant {2 * width - 1} : {dtype}")
+            rewritten.append(f"{indent}{result} = arith.andi {current}, {final_mask} : {dtype}")
+            continue
+
+        rewritten.append(line)
+
+    return "\n".join(rewritten) + ("\n" if mlir_source.endswith("\n") else "")
+
+
 def _extract_mlir_source(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -159,33 +274,57 @@ def _run_checked(cmd: list[str], *, input_text: str | None = None) -> subprocess
     return proc
 
 
-def build_debug_pipeline() -> Pipeline:
+_PRE_LOW_PRECISION_LEGALIZATION_PASSES = (
+    "canonicalize",
+    "cse",
+    "func.func(convert-linalg-to-loops)",
+    "canonicalize",
+    "cse",
+)
+
+_POST_LOW_PRECISION_LEGALIZATION_PASSES = (
+    "convert-scf-to-cf",
+    "expand-strided-metadata",
+    "lower-affine",
+    "finalize-memref-to-llvm",
+    "arith-expand{include-f4e2m1=true}",
+    "convert-math-to-libm",
+    "convert-math-to-llvm",
+    "convert-arith-to-llvm",
+    "convert-func-to-llvm",
+    "convert-cf-to-llvm",
+    "reconcile-unrealized-casts",
+)
+
+
+def _build_pipeline(pass_names: tuple[str, ...]) -> Pipeline:
     pipeline = Pipeline()
-    for pass_name in (
-        "canonicalize",
-        "cse",
-        "func.func(convert-linalg-to-loops)",
-        "canonicalize",
-        "cse",
-        "convert-scf-to-cf",
-        "expand-strided-metadata",
-        "lower-affine",
-        "finalize-memref-to-llvm",
-        "arith-expand{include-f4e2m1=true}",
-        "convert-math-to-llvm",
-        "convert-arith-to-llvm",
-        "convert-func-to-llvm",
-        "convert-cf-to-llvm",
-        "reconcile-unrealized-casts",
-    ):
+    for pass_name in pass_names:
         pipeline.add(pass_name)
     return pipeline
 
 
+def build_debug_pipeline() -> Pipeline:
+    return _build_pipeline(
+        _PRE_LOW_PRECISION_LEGALIZATION_PASSES
+        + _POST_LOW_PRECISION_LEGALIZATION_PASSES
+    )
+
+
 def lower_to_llvm_dialect_mlir(value: Any, *, pipeline: Pipeline | None = None) -> str:
-    mlir_source = _legalize_low_precision_conversions_for_riscv(_extract_mlir_source(value))
-    active_pipeline = pipeline if pipeline is not None else build_debug_pipeline()
-    return active_pipeline.run(mlir_source)
+    mlir_source = _extract_mlir_source(value)
+    if pipeline is not None:
+        mlir_source = _legalize_low_precision_conversions_for_riscv(mlir_source)
+        mlir_source = _legalize_unsupported_math_ops_for_riscv(mlir_source)
+        return pipeline.run(mlir_source)
+
+    # Linalg lowering materializes the scalar FP8 extension operations used by
+    # mixed-precision matmul. Legalize those operations only after they exist,
+    # then continue with the LLVM conversion passes.
+    mlir_source = _build_pipeline(_PRE_LOW_PRECISION_LEGALIZATION_PASSES).run(mlir_source)
+    mlir_source = _legalize_low_precision_conversions_for_riscv(mlir_source)
+    mlir_source = _legalize_unsupported_math_ops_for_riscv(mlir_source)
+    return _build_pipeline(_POST_LOW_PRECISION_LEGALIZATION_PASSES).run(mlir_source)
 
 
 def emit_mlir(value: Any, path: str | os.PathLike[str] | None = None) -> str:

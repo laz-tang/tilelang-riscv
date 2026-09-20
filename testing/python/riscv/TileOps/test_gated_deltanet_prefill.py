@@ -33,6 +33,54 @@ def _load_gated_deltanet_prefill_module():
     )
 
 
+def _gated_deltanet_prefill_reference_bthd(q, k, v, g, beta, chunk_size):
+    """Reference for one or more BTHD chunks, kept small for RISC-V tests."""
+    batch, seq_len, heads, dim_k = q.shape
+    dim_v = v.shape[-1]
+    num_chunks = seq_len // chunk_size
+    g_cum = g.reshape(batch, num_chunks, chunk_size, heads).cumsum(dim=2)
+    g_cum = g_cum.reshape_as(g)
+    output = torch.empty_like(v)
+    states = torch.zeros(batch, heads, num_chunks + 1, dim_k, dim_v, dtype=torch.float32)
+
+    for b in range(batch):
+        for h in range(heads):
+            state = torch.zeros(dim_k, dim_v, dtype=torch.float32)
+            for chunk in range(num_chunks):
+                start = chunk * chunk_size
+                end = start + chunk_size
+                q_c = q[b, start:end, h].float()
+                k_c = k[b, start:end, h].float()
+                v_c = v[b, start:end, h].float()
+                g_c = g_cum[b, start:end, h].float()
+                beta_c = beta[b, start:end, h].float()
+
+                k_beta = k_c * beta_c.unsqueeze(-1)
+                v_beta = v_c * beta_c.unsqueeze(-1)
+                gram = k_beta @ k_c.T
+                transform = torch.eye(chunk_size, dtype=torch.float32)
+                for i in range(chunk_size):
+                    for j in range(i):
+                        transform[i, j] = -gram[i, j] * torch.exp(g_c[i] - g_c[j])
+                w_c = transform @ k_beta
+                u_c = transform @ v_beta
+
+                g_last = g_c[-1]
+                v_new = u_c - (w_c @ state) * torch.exp(g_c + g_last).unsqueeze(-1)
+                output[b, start:end, h] = (
+                    q_c @ state * torch.exp(g_c).unsqueeze(-1)
+                    + (q_c @ k_c.T)
+                    .tril()
+                    .mul(torch.exp(g_c[:, None] - g_c[None, :]))
+                    @ v_new
+                ).to(output.dtype)
+                state = state * torch.exp(g_last) + k_c.T @ (
+                    v_new * torch.exp(g_last - g_c).unsqueeze(-1)
+                )
+                states[b, h, chunk + 1] = state
+    return output, states[:, :, -1]
+
+
 def test_gated_deltanet_prefill_chunk_local_cumsum_bhtd_float32_runtime_compare():
     batch, heads, seq_len, chunk_size = 1, 2, 4, 2
     module = _load_gated_deltanet_prefill_module()
@@ -394,3 +442,50 @@ def test_gated_deltanet_prefill_group_transition_summary_bthd_float32_runtime_co
     expected[0, 0, 0] = state
 
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_gated_deltanet_prefill_public_bthd_float32_runtime_compare():
+    batch, heads, seq_len, chunk_size = 1, 1, 4, 2
+    dim_k = dim_v = 16
+    module = _load_gated_deltanet_prefill_module()
+    tileops_kernel = module.GatedDeltaNetPrefillFwdKernel(
+        batch,
+        heads,
+        seq_len,
+        chunk_size,
+        dim_k,
+        dim_v,
+        dtype="float32",
+        layout="bthd",
+        config={
+            "fused_num_stages": 1,
+            "fused_threads": 64,
+            "h_num_stages": 1,
+            "h_threads": 64,
+            "h_block_v": 16,
+            "o_threads": 64,
+        },
+    )
+
+    q = torch.linspace(-0.5, 0.5, batch * seq_len * heads * dim_k, dtype=torch.float32).reshape(
+        batch, seq_len, heads, dim_k
+    )
+    k = torch.linspace(-0.4, 0.4, batch * seq_len * heads * dim_k, dtype=torch.float32).reshape(
+        batch, seq_len, heads, dim_k
+    )
+    v = torch.linspace(-0.3, 0.3, batch * seq_len * heads * dim_v, dtype=torch.float32).reshape(
+        batch, seq_len, heads, dim_v
+    )
+    g = torch.tensor([[[[-0.2]], [[0.3]], [[-0.1]], [[0.2]]]], dtype=torch.float32).reshape(
+        batch, seq_len, heads
+    )
+    beta = torch.tensor([[[[0.25]], [[0.75]], [[0.4]], [[0.6]]]], dtype=torch.float32).reshape(
+        batch, seq_len, heads
+    )
+
+    actual_o, actual_state = tileops_kernel(q, k, v, g, beta)
+    expected_o, expected_state = _gated_deltanet_prefill_reference_bthd(
+        q, k, v, g, beta, chunk_size
+    )
+    torch.testing.assert_close(actual_o, expected_o, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(actual_state, expected_state, rtol=1e-4, atol=1e-4)

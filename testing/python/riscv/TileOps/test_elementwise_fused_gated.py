@@ -14,6 +14,7 @@ def _gelu_tanh(value: torch.Tensor) -> torch.Tensor:
     ("kernel_name", "activation", "rtol", "atol"),
     [
         ("SiluAndMulFwdKernel", lambda gate: gate * torch.sigmoid(gate), 1e-5, 1e-5),
+        ("GeluAndMulFwdKernel", torch.nn.functional.gelu, 1e-5, 1e-5),
         ("GeluTanhAndMulFwdKernel", _gelu_tanh, 1e-5, 1e-5),
     ],
 )

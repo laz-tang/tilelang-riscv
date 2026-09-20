@@ -1,19 +1,31 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 
 from ._harness import get_kernel_class
 
 
-def test_moe_permute_nopad_float32_runtime_compare():
+def test_moe_pre_permute_contiguous_float32_runtime_compare():
     num_tokens, top_k, num_experts, hidden_size = 2, 2, 4, 8
-    kernel_cls = get_kernel_class("moe.permute_nopad", "MoePermuteNopadKernel")
-    tileops_kernel = kernel_cls(
-        num_tokens=num_tokens,
-        top_k=top_k,
+    kernel_cls = get_kernel_class(
+        "moe.permute_contiguous", "MoePrePermuteContiguousKernel"
+    )
+    call_spec = __import__("tileops.kernels.moe.call_spec", fromlist=["PrePermuteCall"])
+    call = call_spec.PrePermuteCall(
+        arch=90,
+        sm_count=1,
+        layout=SimpleNamespace(selection_key="tight_physical_psum", alignment=1),
+        input_dtype=torch.float32,
         num_experts=num_experts,
+        num_tokens=num_tokens,
         hidden_size=hidden_size,
-        dtype=torch.float32,
+        top_k=top_k,
+    )
+    tileops_kernel = kernel_cls(
+        call,
+        config={"threads": 4, "gather_rows_per_block": 2},
     )
 
     # The public TileOps wrapper asserts CUDA tensors.  Validate the two
@@ -31,33 +43,25 @@ def test_moe_permute_nopad_float32_runtime_compare():
         dtype=torch.float32,
     ).reshape(num_tokens, hidden_size)
 
-    expert_first_token_offset = torch.empty(num_experts + 1, dtype=torch.int64)
-    true_offsets = torch.empty(num_experts, dtype=torch.int32)
-    true_sizes = torch.empty(num_experts, dtype=torch.int32)
+    physical_ends = torch.empty(num_experts, dtype=torch.int32)
     permuted_idx = torch.empty(num_tokens * top_k, dtype=torch.int32)
-    fwd_idx = torch.empty(num_tokens * top_k, dtype=torch.int32)
-    write_offsets = torch.empty(num_experts, dtype=torch.int32)
+    inverse_indices = torch.empty(num_tokens * top_k, dtype=torch.int32)
     perm_h = torch.empty(num_tokens * top_k, hidden_size, dtype=torch.float32)
 
     scan(
         flat_ids,
-        expert_first_token_offset,
-        true_offsets,
-        true_sizes,
+        physical_ends,
         permuted_idx,
-        fwd_idx,
-        write_offsets,
+        inverse_indices,
     )
     gather(hidden, permuted_idx, perm_h)
 
     torch.testing.assert_close(
-        expert_first_token_offset,
-        torch.tensor([0, 1, 2, 4, 4], dtype=torch.int64),
+        physical_ends,
+        torch.tensor([1, 2, 4, 4], dtype=torch.int32),
     )
-    torch.testing.assert_close(true_offsets, torch.tensor([0, 1, 2, 4], dtype=torch.int32))
-    torch.testing.assert_close(true_sizes, torch.tensor([1, 1, 2, 0], dtype=torch.int32))
     torch.testing.assert_close(permuted_idx, torch.tensor([0, 1, 0, 1], dtype=torch.int32))
-    torch.testing.assert_close(fwd_idx, torch.tensor([2, 0, 1, 3], dtype=torch.int32))
+    torch.testing.assert_close(inverse_indices, torch.tensor([2, 0, 1, 3], dtype=torch.int32))
     torch.testing.assert_close(
         perm_h,
         torch.vstack([hidden[0], hidden[1], hidden[0], hidden[1]]),

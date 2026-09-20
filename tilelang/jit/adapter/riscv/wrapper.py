@@ -325,11 +325,27 @@ def _emit_f4_conversion_helpers(llvm_ir: str) -> str:
     return "\n".join(definitions)
 
 
+def _emit_math_helpers(llvm_ir: str) -> str:
+    if not re.search(r"\brsqrtf\b", llvm_ir):
+        return ""
+    return "\n".join(
+        [
+            "#include <math.h>",
+            "",
+            "float rsqrtf(float value) {",
+            "  return 1.0f / sqrtf(value);",
+            "}",
+            "",
+        ]
+    )
+
+
 def _emit_host_helper_source(llvm_ir: str) -> str:
     helper_parts = [
         _emit_ptr_to_memref_helpers(llvm_ir),
         _emit_f8_conversion_helpers(llvm_ir),
         _emit_f4_conversion_helpers(llvm_ir),
+        _emit_math_helpers(llvm_ir),
     ]
     return "\n".join(part for part in helper_parts if part)
 
@@ -698,7 +714,11 @@ def _riscv_gcc_runtime_library_dirs(gcc_root: Path) -> list[Path]:
     return runtime_dirs
 
 
-def _riscv_clang_flags(*, include_runtime_library_dirs: bool = False) -> list[str]:
+def _riscv_clang_flags(
+    *,
+    include_runtime_library_dirs: bool = False,
+    include_abi: bool = True,
+) -> list[str]:
     flags: list[str] = []
     gcc_root = _resolve_riscv_gcc_root()
     if gcc_root is not None:
@@ -712,7 +732,7 @@ def _riscv_clang_flags(*, include_runtime_library_dirs: bool = False) -> list[st
                 flags.append(f"-Wl,-rpath,{runtime_dir}")
     if os.environ.get("TILELANG_RISCV_MARCH"):
         flags.append(f"-march={os.environ['TILELANG_RISCV_MARCH']}")
-    if os.environ.get("TILELANG_RISCV_ABI"):
+    if include_abi and os.environ.get("TILELANG_RISCV_ABI"):
         flags.append(f"-mabi={os.environ['TILELANG_RISCV_ABI']}")
     if os.environ.get("TILELANG_RISCV_CPU"):
         flags.append(f"-mcpu={os.environ['TILELANG_RISCV_CPU']}")
@@ -885,7 +905,7 @@ def build_qemu_executable(
             str(out_path),
         ]
         cmd.extend(_infer_riscv_abi_flag(obj_path))
-        cmd.extend(_riscv_clang_flags())
+        cmd.extend(_riscv_clang_flags(include_abi=False))
         if clang_flags:
             cmd.extend(clang_flags)
         try:
@@ -913,11 +933,16 @@ def build_host_shared_library(
         ll_path = temp_dir_path / f"{out_path.stem}.ll"
         ll_path.write_text(llvm_ir)
         helper_source = _emit_host_helper_source(llvm_ir)
+        opt_level = os.environ.get("TILELANG_RISCV_CLANG_OPT_LEVEL", "2").lower()
+        if opt_level not in {"0", "1", "2", "3", "s", "z"}:
+            raise RiscvRunnerError(
+                "TILELANG_RISCV_CLANG_OPT_LEVEL must be one of 0, 1, 2, 3, s, or z"
+            )
         cmd = [
             str(resolve_tool("clang")),
             "-shared",
             "-fPIC",
-            "-O2",
+            f"-O{opt_level}",
             "-Wno-override-module",
             "-x",
             "ir",
@@ -928,6 +953,7 @@ def build_host_shared_library(
             f"-Wl,-rpath,{llvm_lib_dir}",
             "-lmlir_c_runner_utils",
             "-lmlir_runner_utils",
+            "-lm",
         ]
         if helper_source:
             helper_path = temp_dir_path / f"{out_path.stem}_ptr_helpers.c"

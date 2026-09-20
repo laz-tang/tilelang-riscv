@@ -68,6 +68,26 @@ def _thread_invariant_shared_alloc_kernel():
     return thread_invariant_shared_alloc_probe
 
 
+def _thread_invariant_shared_alloc_sync_kernel():
+    @T.prim_func
+    def thread_invariant_shared_alloc_sync_probe(
+        A: T.Tensor((4,), "float32"),
+        B: T.Tensor((4,), "float32"),
+    ):
+        with T.Kernel(1, threads=4):
+            scratch = T.alloc_shared((4,), "float32")
+            for i in T.Parallel(4):
+                scratch[i] = A[i]
+            T.sync_threads()
+            for i in T.Parallel(4):
+                scratch[i] = scratch[i] * T.float32(2)
+            T.sync_threads()
+            for i in T.Parallel(4):
+                B[i] = scratch[i]
+
+    return thread_invariant_shared_alloc_sync_probe
+
+
 def _mixed_shared_local_sync_kernel():
     @T.prim_func
     def mixed_shared_local_sync_probe(A: T.Tensor((4,), "float32"), B: T.Tensor((4,), "float32")):
@@ -301,6 +321,19 @@ def _shfl_sync_kernel():
             B[tid] = T.shfl_sync(value, 0)
 
     return shfl_sync_probe
+
+
+def _shfl_sync_dynamic_source_lane_kernel():
+    @T.prim_func
+    def shfl_sync_dynamic_source_lane_probe(
+        A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")
+    ):
+        with T.Kernel(1, threads=4):
+            tid = T.get_thread_binding()
+            source_lane = tid // 2 * 2
+            B[tid] = T.shfl_sync(A[tid], source_lane, width=2)
+
+    return shfl_sync_dynamic_source_lane_probe
 
 
 def _shfl_sync_local_value_kernel():
@@ -1035,6 +1068,19 @@ def test_shfl_sync_lowers_by_serialized_warp_replay():
     assert "memref.load" in source
 
 
+def test_shfl_sync_dynamic_source_lane_lowers_by_serialized_warp_replay():
+    source = lower_tilelang_prim_to_mlir(
+        _shfl_sync_dynamic_source_lane_kernel(),
+        "shfl_sync_dynamic_source_lane",
+        "cooperative/shfl_sync_dynamic_source_lane",
+    )
+
+    assert "tl.shfl_sync" not in source
+    assert "Unsupported" not in source
+    assert "arith.remui" in source
+    assert "memref.load" in source
+
+
 def test_shfl_sync_local_value_lowers_by_serialized_warp_replay():
     source = lower_tilelang_prim_to_mlir(
         _shfl_sync_local_value_kernel(),
@@ -1224,27 +1270,42 @@ def test_warp_reduce_sum_lowers_by_serialized_warp_replay():
 
 
 def test_warp_reduce_sum_local_value_lowers_by_serialized_warp_replay():
-    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
-        build_mlir_from_tilelang_prim(
-            _warp_reduce_local_value_kernel(),
-            "warp_reduce_sum_local_value",
-        )
+    source = lower_tilelang_prim_to_mlir(
+        _warp_reduce_local_value_kernel(),
+        "warp_reduce_sum_local_value",
+        "cooperative/warp_reduce_sum_local_value",
+    )
+
+    assert "tl.warp_reduce_sum" not in source
+    assert "Unsupported" not in source
+    assert "memref.load" in source
+    assert "scf.if" in source
 
 
 def test_warp_reduce_sum_loop_local_value_lowers_by_serialized_warp_replay():
-    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
-        build_mlir_from_tilelang_prim(
-            _warp_reduce_loop_local_value_kernel(),
-            "warp_reduce_sum_loop_local_value",
-        )
+    source = lower_tilelang_prim_to_mlir(
+        _warp_reduce_loop_local_value_kernel(),
+        "warp_reduce_sum_loop_local_value",
+        "cooperative/warp_reduce_sum_loop_local_value",
+    )
+
+    assert "tl.warp_reduce_sum" not in source
+    assert "Unsupported" not in source
+    assert "memref.load" in source
+    assert source.count("scf.for") >= 2
 
 
 def test_warp_reduce_sum_dynamic_loop_local_value_lowers_by_serialized_warp_replay():
-    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
-        build_mlir_from_tilelang_prim(
-            _warp_reduce_dynamic_loop_local_value_kernel(),
-            "warp_reduce_sum_dynamic_loop_local_value",
-        )
+    source = lower_tilelang_prim_to_mlir(
+        _warp_reduce_dynamic_loop_local_value_kernel(),
+        "warp_reduce_sum_dynamic_loop_local_value",
+        "cooperative/warp_reduce_sum_dynamic_loop_local_value",
+    )
+
+    assert "tl.warp_reduce_sum" not in source
+    assert "Unsupported" not in source
+    assert "memref.load" in source
+    assert source.count("scf.for") >= 2
 
 
 def test_warp_reduce_max_lowers_by_serialized_warp_replay():
@@ -1305,43 +1366,68 @@ def test_warp_reduce_bitxor_lowers_by_serialized_warp_replay():
 
 
 def test_warp_reduce_max_local_vector_lowers_by_serialized_warp_replay():
-    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
-        build_mlir_from_tilelang_prim(
-            _warp_reduce_max_local_vector_kernel(),
-            "warp_reduce_max_local_vector",
-        )
+    source = lower_tilelang_prim_to_mlir(
+        _warp_reduce_max_local_vector_kernel(),
+        "warp_reduce_max_local_vector",
+        "cooperative/warp_reduce_max_local_vector",
+    )
+
+    assert "tl.warp_reduce_max" not in source
+    assert "Unsupported" not in source
+    assert "memref.load" in source
+    assert "arith.select" in source
 
 
 def test_warp_reduce_max_float_local_vector_lowers_by_serialized_warp_replay():
-    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
-        build_mlir_from_tilelang_prim(
-            _warp_reduce_max_float_local_vector_kernel(),
-            "warp_reduce_max_float_local_vector",
-        )
+    source = lower_tilelang_prim_to_mlir(
+        _warp_reduce_max_float_local_vector_kernel(),
+        "warp_reduce_max_float_local_vector",
+        "cooperative/warp_reduce_max_float_local_vector",
+    )
+
+    assert "tl.warp_reduce_max" not in source
+    assert "Unsupported" not in source
+    assert "memref.load" in source
+    assert "arith.select" in source
 
 
 def test_warp_reduce_sum_thread_index_helper_lowers_by_serialized_warp_replay():
-    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
-        build_mlir_from_tilelang_prim(
-            _warp_reduce_sum_thread_index_helper_kernel(),
-            "warp_reduce_sum_thread_index_helper",
-        )
+    source = lower_tilelang_prim_to_mlir(
+        _warp_reduce_sum_thread_index_helper_kernel(),
+        "warp_reduce_sum_thread_index_helper",
+        "cooperative/warp_reduce_sum_thread_index_helper",
+    )
+
+    assert "tl.warp_reduce_sum" not in source
+    assert "Unsupported" not in source
+    assert "arith.remui" in source
+    assert "scf.if" in source
 
 
 def test_warp_reduce_sum_self_store_lowers_by_serialized_warp_replay():
-    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
-        build_mlir_from_tilelang_prim(
-            _warp_reduce_sum_self_store_kernel(),
-            "warp_reduce_sum_self_store",
-        )
+    source = lower_tilelang_prim_to_mlir(
+        _warp_reduce_sum_self_store_kernel(),
+        "warp_reduce_sum_self_store",
+        "cooperative/warp_reduce_sum_self_store",
+    )
+
+    assert "tl.warp_reduce_sum" not in source
+    assert "Unsupported" not in source
+    assert "memref.store" in source
+    assert "scf.if" in source
 
 
 def test_warp_reduce_max_self_store_lowers_by_serialized_warp_replay():
-    with pytest.raises(Exception, match="direct thread-local replay lost its backing"):
-        build_mlir_from_tilelang_prim(
-            _warp_reduce_max_self_store_kernel(),
-            "warp_reduce_max_self_store",
-        )
+    source = lower_tilelang_prim_to_mlir(
+        _warp_reduce_max_self_store_kernel(),
+        "warp_reduce_max_self_store",
+        "cooperative/warp_reduce_max_self_store",
+    )
+
+    assert "tl.warp_reduce_max" not in source
+    assert "Unsupported" not in source
+    assert "memref.store" in source
+    assert "arith.select" in source
 
 
 def test_warp_reduce_sum_self_store_shared_phase_lowers_by_serialized_replay():
@@ -1434,6 +1520,20 @@ def test_thread_invariant_shared_alloc_lowers_with_cta_scoped_buffer():
     assert "tvm_storage_sync" not in source
     assert "memref.alloca" in source
     assert "scf.parallel" in source
+
+
+def test_thread_invariant_shared_sync_phases_execute_once_per_cta():
+    source = lower_tilelang_prim_to_mlir(
+        _thread_invariant_shared_alloc_sync_kernel(),
+        "thread_invariant_shared_alloc_sync",
+        "cooperative/thread_invariant_shared_alloc_sync",
+    )
+
+    assert "tvm_storage_sync" not in source
+    assert source.count("scf.parallel") == 3
+    # Only the two unit-extent y/z thread dimensions remain around each
+    # phase; the four-lane x launch must not replay the complete T.Parallel.
+    assert source.count("scf.for") == 6
 
 
 def test_mixed_shared_local_alloc_sync_threads_lowers_when_local_is_phase_private():

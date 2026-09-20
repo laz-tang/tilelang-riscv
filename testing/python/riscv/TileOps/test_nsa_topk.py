@@ -63,7 +63,6 @@ def test_nsa_topk_varlen_float32_runtime_compare():
         selected_block_num,
         bc,
         bs,
-        dim,
         torch.float32,
         torch.float32,
         config={"threads": 32},

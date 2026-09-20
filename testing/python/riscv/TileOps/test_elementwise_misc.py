@@ -22,14 +22,10 @@ def _run_binary_bool_compare(
     b_flat = b.contiguous().reshape(-1)
     kernel_cls = get_elementwise_kernel_class(kernel_name)
     tileops_kernel = kernel_cls(
-        a_flat.numel(),
-        kernel_dtype or a.dtype,
         (a_flat.numel(),),
-        (1,),
-        (1,),
-        a_flat.numel(),
-        b_flat.numel(),
-        strategy="direct",
+        (b_flat.numel(),),
+        kernel_dtype or a.dtype,
+        config={"strategy": "direct"},
     )
     actual = compile_tileops_kernel(tileops_kernel)(a_flat, b_flat)
     expected = reference(a, b).reshape(-1)
@@ -115,14 +111,10 @@ def test_bitwise_int32_runtime_compare(kernel_name, reference):
     a_flat = a.contiguous().reshape(-1)
     b_flat = b.contiguous().reshape(-1)
     tileops_kernel = get_elementwise_kernel_class(kernel_name)(
-        a_flat.numel(),
-        a.dtype,
         (a_flat.numel(),),
-        (1,),
-        (1,),
-        a_flat.numel(),
-        b_flat.numel(),
-        strategy="direct",
+        (b_flat.numel(),),
+        a.dtype,
+        config={"strategy": "direct"},
     )
     actual = compile_tileops_kernel(tileops_kernel)(a_flat, b_flat)
     torch.testing.assert_close(actual, reference(a, b), rtol=0.0, atol=0.0)
@@ -170,7 +162,7 @@ def test_logical_not_bool_storage_uint8_runtime_compare():
     tileops_kernel = get_elementwise_kernel_class("LogicalNotBoolStorageFwdKernel")(
         N_total=x.numel(),
         dtype=torch.uint8,
-        strategy="direct",
+        config={"strategy": "direct"},
     )
     actual = compile_tileops_kernel(tileops_kernel)(x.contiguous())
     expected = torch.logical_not(x.to(torch.bool))

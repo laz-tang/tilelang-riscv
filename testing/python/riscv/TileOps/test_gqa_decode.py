@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from ._harness import get_kernel_class
+from ._harness import compile_tileops_jit, get_kernel_class
 
 
 def _reference(
@@ -33,10 +33,10 @@ def test_gqa_decode_no_split_float32_runtime_compare():
     tileops_kernel = kernel_cls(
         batch=batch,
         heads=heads,
-        groups=groups,
-        seqlen_kv=seqlen_kv,
+        heads_kv=groups,
+        seq_len_kv=seqlen_kv,
         dim=dim,
-        dtype="float32",
+        dtype=torch.float32,
         config={
             "block_H": 2,
             "block_N": 8,
@@ -45,6 +45,10 @@ def test_gqa_decode_no_split_float32_runtime_compare():
             "threads": 128,
         },
     )
+    no_split_config = {
+        key: value for key, value in tileops_kernel.config.items() if key != "num_split"
+    }
+    kernel = compile_tileops_jit(tileops_kernel.no_split_jit, no_split_config)
 
     q = torch.linspace(-0.5, 0.5, batch * heads * dim, dtype=torch.float32).reshape(
         batch, heads, dim
@@ -62,6 +66,6 @@ def test_gqa_decode_no_split_float32_runtime_compare():
         dtype=torch.float32,
     ).reshape(batch, seqlen_kv, groups, dim)
 
-    actual = tileops_kernel(q, k, v, seqlen_kv)
+    actual = kernel(q, k, v)
     expected = _reference(q, k, v, seqlen_kv, groups)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)

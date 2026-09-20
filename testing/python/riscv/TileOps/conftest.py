@@ -8,10 +8,13 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 TILEOPS_ROOT = Path(os.environ.get("TILEOPS_ROOT", REPO_ROOT / "3rdparty" / "TileOPs"))
+TILEOPS_SOURCE_ROOT = TILEOPS_ROOT / "src" if (TILEOPS_ROOT / "src" / "tileops").is_dir() else TILEOPS_ROOT
 
 os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
+os.environ.setdefault("TILELANG_TARGET", "riscv")
+os.environ.setdefault("TILELANG_RISCV_CLANG_OPT_LEVEL", "0")
 
-for path in (REPO_ROOT, TILEOPS_ROOT):
+for path in (REPO_ROOT, TILEOPS_SOURCE_ROOT):
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)

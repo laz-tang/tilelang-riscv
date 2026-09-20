@@ -25,7 +25,7 @@ def test_avg_pool1d_float32_runtime_compare():
 
     kernel = compile_tileops_kernel(tileops_kernel)
     expected = torch.nn.functional.avg_pool1d(x, kernel_size=2, stride=2)
-    _assert_close(kernel(x.contiguous()), expected)
+    _assert_close(kernel(x.flatten(0, 1).contiguous()), expected)
 
 
 def test_avg_pool1d_spatial_float32_runtime_compare():
@@ -42,7 +42,7 @@ def test_avg_pool1d_spatial_float32_runtime_compare():
 
     kernel = compile_tileops_kernel(tileops_kernel)
     expected = torch.nn.functional.avg_pool1d(x, kernel_size=2, stride=2)
-    _assert_close(kernel(x.contiguous()), expected)
+    _assert_close(kernel(x.flatten(0, 1).contiguous()), expected)
 
 
 def test_avg_pool2d_float32_runtime_compare():
@@ -66,7 +66,7 @@ def test_avg_pool2d_float32_runtime_compare():
 
     kernel = compile_tileops_kernel(tileops_kernel)
     expected = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
-    _assert_close(kernel(x.contiguous()), expected)
+    _assert_close(kernel(x.flatten(0, 1).contiguous()), expected)
 
 
 def test_avg_pool2d_spatial_float32_runtime_compare():
@@ -87,7 +87,7 @@ def test_avg_pool2d_spatial_float32_runtime_compare():
 
     kernel = compile_tileops_kernel(tileops_kernel)
     expected = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
-    _assert_close(kernel(x.contiguous()), expected)
+    _assert_close(kernel(x.flatten(0, 1).contiguous()), expected)
 
 
 def test_avg_pool3d_float32_runtime_compare():
@@ -119,7 +119,7 @@ def test_avg_pool3d_float32_runtime_compare():
         kernel_size=(2, 2, 2),
         stride=(2, 2, 1),
     )
-    _assert_close(kernel(x.contiguous()), expected)
+    _assert_close(kernel(x.flatten(0, 1).contiguous()), expected)
 
 
 def test_avg_pool3d_spatial_float32_runtime_compare():
@@ -148,7 +148,7 @@ def test_avg_pool3d_spatial_float32_runtime_compare():
         kernel_size=(2, 2, 2),
         stride=(2, 2, 1),
     )
-    _assert_close(kernel(x.contiguous()), expected)
+    _assert_close(kernel(x.flatten(0, 1).contiguous()), expected)
 
 
 def test_max_pool2d_float32_runtime_compare():
@@ -172,7 +172,7 @@ def test_max_pool2d_float32_runtime_compare():
 
     kernel = compile_tileops_kernel(tileops_kernel)
     expected = torch.nn.functional.max_pool2d(x, kernel_size=2, stride=2)
-    _assert_close(kernel(x.contiguous()), expected)
+    _assert_close(kernel(x.flatten(0, 1).contiguous()), expected)
 
 
 def test_max_pool2d_with_indices_float32_runtime_compare():
@@ -201,6 +201,6 @@ def test_max_pool2d_with_indices_float32_runtime_compare():
         stride=2,
         return_indices=True,
     )
-    actual_val, actual_idx = kernel(x.contiguous())
+    actual_val, actual_idx = kernel(x.flatten(0, 1).contiguous())
     _assert_close(actual_val, expected_val)
     torch.testing.assert_close(actual_idx.reshape(expected_idx.shape), expected_idx)

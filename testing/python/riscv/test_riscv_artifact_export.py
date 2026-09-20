@@ -14,6 +14,7 @@ from tilelang.jit.adapter.riscv import (
     emit_mlir,
     emit_object,
     load_host_module,
+    lower_to_llvm_dialect_mlir,
 )
 from tilelang.tladapter.toolchain import ToolchainNotFoundError
 
@@ -78,6 +79,46 @@ def test_riscv_export_helpers_emit_all_artifacts(tmp_path):
 
     assert obj_path.read_bytes() == obj_bytes
     assert obj_path.stat().st_size > 0
+
+
+def test_riscv_fp8_matmul_legalizes_conversions_after_linalg_lowering():
+    source = """
+module {
+  func.func @fp8_matmul(
+      %a: memref<1x1xf8E4M3FN>,
+      %b: memref<1x1xf8E4M3FN>,
+      %c: memref<1x1xf32>) {
+    linalg.matmul ins(%a, %b : memref<1x1xf8E4M3FN>, memref<1x1xf8E4M3FN>)
+                  outs(%c : memref<1x1xf32>)
+    return
+  }
+}
+"""
+
+    llvm_mlir = lower_to_llvm_dialect_mlir(source)
+
+    assert "tilelang_riscv_f8e4m3fn_to_f32" in llvm_mlir
+    assert "llvm.fpext" not in llvm_mlir
+
+
+def test_riscv_legalizes_copysign_and_ctpop_without_external_helpers():
+    source = """
+module {
+  func.func @math_legalization(%magnitude: f32, %sign: f32, %bits: i32) -> (f32, i32) {
+    %signed = math.copysign %magnitude, %sign : f32
+    %count = math.ctpop %bits : i32
+    return %signed, %count : f32, i32
+  }
+}
+"""
+
+    llvm_mlir = lower_to_llvm_dialect_mlir(source)
+
+    assert "math.copysign" not in llvm_mlir
+    assert "math.ctpop" not in llvm_mlir
+    assert "llvm.bitcast" in llvm_mlir
+    assert "llvm.and" in llvm_mlir
+    assert "llvm.lshr" in llvm_mlir
 
 
 def test_riscv_host_sim_executes_copy_on_native_cpu(tmp_path):

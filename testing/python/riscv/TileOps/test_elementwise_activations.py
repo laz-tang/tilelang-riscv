@@ -19,6 +19,20 @@ from ._harness import get_elementwise_kernel_class, run_unary_runtime_compare
             1e-5,
             1e-5,
         ),
+        (
+            "GeluFwdKernel",
+            lambda: torch.linspace(-4.0, 4.0, 256, dtype=torch.float32),
+            lambda value: torch.nn.functional.gelu(value, approximate="none"),
+            1e-5,
+            1e-5,
+        ),
+        (
+            "ErfFwdKernel",
+            lambda: torch.linspace(-3.0, 3.0, 256, dtype=torch.float32),
+            torch.erf,
+            1e-5,
+            1e-5,
+        ),
         ("SigmoidFwdKernel", lambda: torch.linspace(-4.0, 4.0, 256, dtype=torch.float32), torch.sigmoid, 1e-5, 1e-5),
         ("TanhFwdKernel", lambda: torch.linspace(-4.0, 4.0, 256, dtype=torch.float32), torch.tanh, 1e-5, 1e-5),
         (

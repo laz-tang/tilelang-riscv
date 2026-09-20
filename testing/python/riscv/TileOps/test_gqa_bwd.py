@@ -49,7 +49,7 @@ def test_gqa_bwd_float32_runtime_compare():
 
     exp_dq, exp_dk, exp_dv, lse, delta = _reference_attention_bwd(q, k, v, do, is_causal)
 
-    kernel_cls = get_kernel_class("attention.gqa_bwd", "GQABwdKernel")
+    kernel_cls = get_kernel_class("attention.gqa_bwd", "GQABwdWgmmaPipelinedKernel")
     tileops_kernel = kernel_cls(
         batch,
         heads,

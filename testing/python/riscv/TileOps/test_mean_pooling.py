@@ -29,9 +29,10 @@ def test_mean_pooling_float32_runtime_compare():
         0,
         torch.float32,
         torch.float32,
-        config={"bdim": 4, "threads": 4},
+        config={"bwidth": 4, "threads": 4},
     )
     kernel = compile_tileops_kernel(tileops_kernel)
-    actual = kernel(x.contiguous(), offsets, indices)
+    actual = kernel(x.reshape(batch, seq_len, heads * dim).contiguous(), offsets, indices)
+    actual = actual.reshape(batch, chunks_per_batch, heads, dim)
     expected = x.reshape(batch, chunks_per_batch, chunk_size, heads, dim).mean(dim=2)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)

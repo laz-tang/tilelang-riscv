@@ -54,8 +54,6 @@ def test_nsa_cmp_fwd_varlen_float32_runtime_compare():
         scale,
         bc,
         bs,
-        dim_k,
-        dim_v,
         torch.float32,
         torch.float32,
         config={"threads": 32},

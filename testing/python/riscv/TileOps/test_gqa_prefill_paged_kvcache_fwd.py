@@ -80,6 +80,8 @@ def test_gqa_prefill_paged_kvcache_fwd_float32_runtime_compare_and_append():
         v_new,
         k_pages,
         v_pages,
+        None,
+        None,
         cu_seqlens_q,
         cache_seqlens,
         block_table,

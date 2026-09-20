@@ -50,6 +50,8 @@ def test_gqa_prefill_varlen_fwd_float32_runtime_compare():
         batch=batch,
         heads=heads,
         heads_kv=heads_kv,
+        max_seqlen_q=max(seqs_q),
+        max_seqlen_kv=max(seqs_kv),
         dim=dim,
         is_causal=False,
         dtype=torch.float32,
@@ -66,14 +68,12 @@ def test_gqa_prefill_varlen_fwd_float32_runtime_compare():
         total_kv, heads_kv, dim
     )
 
-    actual, _ = tileops_kernel(
+    actual = tileops_kernel(
         q,
         k,
         v,
         cu_seqlens_q,
         cu_seqlens_kv,
-        max(seqs_q),
-        max(seqs_kv),
     )
     expected = _reference(q, k, v, cu_seqlens_q, cu_seqlens_kv, batch, heads_kv)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)

@@ -46,9 +46,7 @@ def test_conv1d_float32_runtime_compare():
         dtype=torch.float32,
     ).reshape(channels_out, channels_in, kernel_size)
     weight_flat = weight.permute(0, 2, 1).contiguous().view(channels_out, channels_in * kernel_size)
-    bias = torch.zeros(channels_out, dtype=torch.float32)
-
-    actual = kernel(x, weight_flat, bias)
+    actual = kernel(x, weight_flat)
     expected = F.conv1d(x, weight, bias=None, stride=stride, padding=padding[0], dilation=dilation)
     torch.testing.assert_close(actual, expected.contiguous(), rtol=1e-5, atol=1e-5)
 
@@ -182,9 +180,7 @@ def test_group_conv1d_depthwise_float32_runtime_compare():
         channels_out * (channels_in // groups) * kernel_size,
         dtype=torch.float32,
     ).reshape(channels_out, channels_in // groups, kernel_size)
-    bias = torch.zeros(channels_out, dtype=torch.float32)
-
-    actual = kernel(x, weight, bias)
+    actual = kernel(x, weight)
     expected = F.conv1d(
         x,
         weight,
@@ -243,9 +239,7 @@ def test_conv2d_float32_runtime_compare():
         channels_out * channels_in * kernel_h * kernel_w,
         dtype=torch.float32,
     ).reshape(channels_out, channels_in, kernel_h, kernel_w)
-    bias = torch.zeros(channels_out, dtype=torch.float32)
-
-    actual = kernel(x, weight, bias)
+    actual = kernel(x, weight)
     expected = F.conv2d(
         x,
         weight,
@@ -358,15 +352,11 @@ def test_conv2d_symmetric_float32_runtime_compare():
         dtype=torch.float32,
     ).reshape(channels_out, channels_in, kernel_size, kernel_size)
     bias = torch.linspace(-0.1, 0.1, channels_out, dtype=torch.float32)
-    out_h = (height + 2 * pad - dilation * (kernel_size - 1) - 1) // stride + 1
-    out_w = (width + 2 * pad - dilation * (kernel_size - 1) - 1) // stride + 1
     x_nhwc = torch.empty((batch, height, width, channels_in), dtype=torch.float32)
     weight_krsc = torch.empty(
         (channels_out, kernel_size, kernel_size, channels_in),
         dtype=torch.float32,
     )
-    out_nhwc = torch.empty((batch, out_h, out_w, channels_out), dtype=torch.float32)
-
     expected = F.conv2d(
         x,
         weight,
@@ -375,7 +365,7 @@ def test_conv2d_symmetric_float32_runtime_compare():
         padding=pad,
         dilation=dilation,
     )
-    actual = kernel(x, weight, bias, x_nhwc, weight_krsc, out_nhwc)
+    actual = kernel(x, weight, x_nhwc, weight_krsc, bias)
     torch.testing.assert_close(actual, expected.contiguous(), rtol=1e-5, atol=1e-5)
 
 
@@ -476,9 +466,7 @@ def test_conv3d_float32_runtime_compare():
         channels_out * channels_in * kernel_d * kernel_h * kernel_w,
         dtype=torch.float32,
     ).reshape(channels_out, channels_in, kernel_d, kernel_h, kernel_w)
-    bias = torch.zeros(channels_out, dtype=torch.float32)
-
-    actual = kernel(x, weight, bias)
+    actual = kernel(x, weight)
     expected = F.conv3d(
         x,
         weight,
@@ -603,9 +591,7 @@ def test_group_conv2d_depthwise_float32_runtime_compare():
         channels_out * (channels_in // groups) * kernel_h * kernel_w,
         dtype=torch.float32,
     ).reshape(channels_out, channels_in // groups, kernel_h, kernel_w)
-    bias = torch.zeros(channels_out, dtype=torch.float32)
-
-    actual = kernel(x, weight, bias)
+    actual = kernel(x, weight)
     expected = F.conv2d(
         x,
         weight,
@@ -671,9 +657,7 @@ def test_group_conv3d_depthwise_float32_runtime_compare():
         channels_out * (channels_in // groups) * kernel_d * kernel_h * kernel_w,
         dtype=torch.float32,
     ).reshape(channels_out, channels_in // groups, kernel_d, kernel_h, kernel_w)
-    bias = torch.zeros(channels_out, dtype=torch.float32)
-
-    actual = kernel(x, weight, bias)
+    actual = kernel(x, weight)
     expected = F.conv3d(
         x,
         weight,
